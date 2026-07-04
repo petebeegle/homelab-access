@@ -17,7 +17,7 @@ type Config struct {
 	AuthentikToken    string
 	WGEasyBaseURL     string
 	WGEasyPassword    string
-	DatabasePath      string
+	StorePath         string
 	DownloadTokenTTL  time.Duration
 	ReadyWhenUnsealed bool
 }
@@ -33,7 +33,7 @@ func Load() (Config, error) {
 		AuthentikToken:   os.Getenv("AUTHENTIK_TOKEN"),
 		WGEasyBaseURL:    strings.TrimRight(os.Getenv("WGEASY_BASE_URL"), "/"),
 		WGEasyPassword:   os.Getenv("WGEASY_PASSWORD"),
-		DatabasePath:     getEnv("DATABASE_PATH", "/data/homelab-access.db"),
+		StorePath:        getEnv("ACCESS_STORE_PATH", getEnv("DATABASE_PATH", "/data/homelab-access.json")),
 	}
 
 	ttl, err := time.ParseDuration(getEnv("DOWNLOAD_TOKEN_TTL", "15m"))
@@ -46,8 +46,8 @@ func Load() (Config, error) {
 	if cfg.HTTPAddr == "" {
 		return Config{}, errors.New("HTTP_ADDR cannot be empty")
 	}
-	if cfg.DatabasePath == "" {
-		return Config{}, errors.New("DATABASE_PATH cannot be empty")
+	if cfg.StorePath == "" {
+		return Config{}, errors.New("ACCESS_STORE_PATH cannot be empty")
 	}
 
 	return cfg, nil

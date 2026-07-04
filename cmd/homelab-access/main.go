@@ -22,9 +22,15 @@ func main() {
 		os.Exit(1)
 	}
 
+	handler, err := server.New(cfg, logger)
+	if err != nil {
+		logger.Error("server setup failed", "error", err)
+		os.Exit(1)
+	}
+
 	srv := &http.Server{
 		Addr:              cfg.HTTPAddr,
-		Handler:           server.New(cfg, logger),
+		Handler:           handler,
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 

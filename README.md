@@ -28,5 +28,6 @@ create wg-easy peers, and deliver single-use WireGuard configs.
 | `AUTHENTIK_TOKEN` | none | Authentik API token |
 | `WGEASY_BASE_URL` | none | wg-easy base URL |
 | `WGEASY_PASSWORD` | none | wg-easy administrative password |
-| `DATABASE_PATH` | `/data/homelab-access.db` | Runtime database path |
+| `ACCESS_STORE_PATH` | `/data/homelab-access.json` | Runtime access request store path |
+| `DATABASE_PATH` | none | Backward-compatible fallback for `ACCESS_STORE_PATH` |
 | `DOWNLOAD_TOKEN_TTL` | `15m` | Default one-time link TTL |
