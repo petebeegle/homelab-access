@@ -3,6 +3,8 @@ package server
 import (
 	"crypto/ed25519"
 	"encoding/hex"
+	"encoding/json"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -78,6 +80,86 @@ func TestMetrics(t *testing.T) {
 	}
 	if !strings.Contains(response.Body.String(), "homelab_access_info") {
 		t.Fatalf("unexpected body: %s", response.Body.String())
+	}
+}
+
+func TestDiscordOAuthCallbackRequiresClientSecret(t *testing.T) {
+	handler := testHandler(t, config.Config{
+		HTTPAddr:           ":8080",
+		DiscordAppID:       "app-1",
+		DiscordRedirectURI: "https://onboard.example.com/oauth/callback",
+	})
+
+	request := httptest.NewRequest(http.MethodGet, "/oauth/callback?code=code-1&guild_id=guild-1", nil)
+	response := httptest.NewRecorder()
+
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusServiceUnavailable, response.Code, response.Body.String())
+	}
+	if !strings.Contains(response.Body.String(), "client secret") {
+		t.Fatalf("expected client secret error, got: %s", response.Body.String())
+	}
+}
+
+func TestDiscordOAuthCallbackExchangesCode(t *testing.T) {
+	var tokenRequestBody string
+	var authHeader string
+	discordAPI := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/oauth2/token" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		if r.Method != http.MethodPost {
+			t.Fatalf("unexpected method: %s", r.Method)
+		}
+		authHeader = r.Header.Get("Authorization")
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		tokenRequestBody = string(body)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"access_token":  "access-token",
+			"token_type":    "Bearer",
+			"expires_in":    604800,
+			"refresh_token": "refresh-token",
+			"scope":         "bot applications.commands",
+		})
+	}))
+	defer discordAPI.Close()
+
+	handler := testHandler(t, config.Config{
+		HTTPAddr:            ":8080",
+		DiscordAppID:        "app-1",
+		DiscordClientSecret: "secret-1",
+		DiscordRedirectURI:  "https://onboard.example.com/oauth/callback",
+		DiscordAPIBaseURL:   discordAPI.URL,
+	})
+
+	request := httptest.NewRequest(http.MethodGet, "/oauth/callback?code=code-1&guild_id=guild-1", nil)
+	response := httptest.NewRecorder()
+
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusOK, response.Code, response.Body.String())
+	}
+	if !strings.Contains(response.Body.String(), "Discord install complete") {
+		t.Fatalf("unexpected body: %s", response.Body.String())
+	}
+	if authHeader == "" {
+		t.Fatal("expected basic auth header")
+	}
+	if !strings.Contains(tokenRequestBody, "grant_type=authorization_code") {
+		t.Fatalf("expected authorization_code grant, got: %s", tokenRequestBody)
+	}
+	if !strings.Contains(tokenRequestBody, "code=code-1") {
+		t.Fatalf("expected code in token request, got: %s", tokenRequestBody)
+	}
+	if !strings.Contains(tokenRequestBody, "redirect_uri=https%3A%2F%2Fonboard.example.com%2Foauth%2Fcallback") {
+		t.Fatalf("expected redirect_uri in token request, got: %s", tokenRequestBody)
 	}
 }
 

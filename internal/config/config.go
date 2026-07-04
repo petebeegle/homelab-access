@@ -8,32 +8,37 @@ import (
 )
 
 type Config struct {
-	HTTPAddr          string
-	PublicBaseURL     string
-	DiscordAppID      string
-	DiscordPublicKey  string
-	DiscordBotToken   string
-	AuthentikBaseURL  string
-	AuthentikToken    string
-	WGEasyBaseURL     string
-	WGEasyPassword    string
-	StorePath         string
-	DownloadTokenTTL  time.Duration
-	ReadyWhenUnsealed bool
+	HTTPAddr            string
+	PublicBaseURL       string
+	DiscordAppID        string
+	DiscordPublicKey    string
+	DiscordBotToken     string
+	DiscordClientSecret string
+	DiscordRedirectURI  string
+	DiscordAPIBaseURL   string
+	AuthentikBaseURL    string
+	AuthentikToken      string
+	WGEasyBaseURL       string
+	WGEasyPassword      string
+	StorePath           string
+	DownloadTokenTTL    time.Duration
+	ReadyWhenUnsealed   bool
 }
 
 func Load() (Config, error) {
 	cfg := Config{
-		HTTPAddr:         getEnv("HTTP_ADDR", ":8080"),
-		PublicBaseURL:    strings.TrimRight(os.Getenv("PUBLIC_BASE_URL"), "/"),
-		DiscordAppID:     os.Getenv("DISCORD_APP_ID"),
-		DiscordPublicKey: os.Getenv("DISCORD_PUBLIC_KEY"),
-		DiscordBotToken:  os.Getenv("DISCORD_BOT_TOKEN"),
-		AuthentikBaseURL: strings.TrimRight(os.Getenv("AUTHENTIK_BASE_URL"), "/"),
-		AuthentikToken:   os.Getenv("AUTHENTIK_TOKEN"),
-		WGEasyBaseURL:    strings.TrimRight(os.Getenv("WGEASY_BASE_URL"), "/"),
-		WGEasyPassword:   os.Getenv("WGEASY_PASSWORD"),
-		StorePath:        getEnv("ACCESS_STORE_PATH", getEnv("DATABASE_PATH", "/data/homelab-access.json")),
+		HTTPAddr:            getEnv("HTTP_ADDR", ":8080"),
+		PublicBaseURL:       strings.TrimRight(os.Getenv("PUBLIC_BASE_URL"), "/"),
+		DiscordAppID:        os.Getenv("DISCORD_APP_ID"),
+		DiscordPublicKey:    os.Getenv("DISCORD_PUBLIC_KEY"),
+		DiscordBotToken:     os.Getenv("DISCORD_BOT_TOKEN"),
+		DiscordClientSecret: os.Getenv("DISCORD_CLIENT_SECRET"),
+		DiscordAPIBaseURL:   strings.TrimRight(getEnv("DISCORD_API_BASE_URL", "https://discord.com/api/v10"), "/"),
+		AuthentikBaseURL:    strings.TrimRight(os.Getenv("AUTHENTIK_BASE_URL"), "/"),
+		AuthentikToken:      os.Getenv("AUTHENTIK_TOKEN"),
+		WGEasyBaseURL:       strings.TrimRight(os.Getenv("WGEASY_BASE_URL"), "/"),
+		WGEasyPassword:      os.Getenv("WGEASY_PASSWORD"),
+		StorePath:           getEnv("ACCESS_STORE_PATH", getEnv("DATABASE_PATH", "/data/homelab-access.json")),
 	}
 
 	ttl, err := time.ParseDuration(getEnv("DOWNLOAD_TOKEN_TTL", "15m"))
@@ -41,6 +46,7 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 	cfg.DownloadTokenTTL = ttl
+	cfg.DiscordRedirectURI = getEnv("DISCORD_REDIRECT_URI", cfg.PublicBaseURL+"/oauth/callback")
 	cfg.ReadyWhenUnsealed = cfg.hasRuntimeSecrets()
 
 	if cfg.HTTPAddr == "" {

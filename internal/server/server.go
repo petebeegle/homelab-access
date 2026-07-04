@@ -1,10 +1,12 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -44,6 +46,7 @@ func NewWithStore(cfg config.Config, logger *slog.Logger, store access.Store) ht
 	mux.HandleFunc("GET /readyz", s.readyz)
 	mux.HandleFunc("GET /metrics", s.metrics)
 	mux.HandleFunc("POST /discord/interactions", s.discordInteraction)
+	mux.HandleFunc("GET /oauth/callback", s.discordOAuthCallback)
 	mux.HandleFunc("GET /download/{token}", s.notImplemented("one-time VPN downloads are not implemented in the foundation build"))
 	mux.HandleFunc("/", s.notFound)
 
@@ -82,6 +85,89 @@ func (s *Server) metrics(w http.ResponseWriter, _ *http.Request) {
 	_, _ = w.Write([]byte("# HELP homelab_access_http_requests_total HTTP requests handled by the service.\n"))
 	_, _ = w.Write([]byte("# TYPE homelab_access_http_requests_total counter\n"))
 	_, _ = w.Write([]byte("homelab_access_http_requests_total " + uintToString(s.requests.Load()) + "\n"))
+}
+
+func (s *Server) discordOAuthCallback(w http.ResponseWriter, r *http.Request) {
+	code := r.URL.Query().Get("code")
+	guildID := r.URL.Query().Get("guild_id")
+	if code == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing discord oauth code"})
+		return
+	}
+	if s.cfg.DiscordClientSecret == "" {
+		s.logger.Error("discord oauth callback cannot exchange code because DISCORD_CLIENT_SECRET is missing", "guild_id", guildID)
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{
+			"error": "discord client secret is not configured",
+		})
+		return
+	}
+
+	token, err := s.exchangeDiscordCode(r.Context(), code)
+	if err != nil {
+		s.logger.Error("discord oauth code exchange failed", "error", err, "guild_id", guildID)
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "discord oauth code exchange failed"})
+		return
+	}
+
+	s.logger.Info("discord oauth install completed", "guild_id", guildID, "scope", token.Scope, "expires_in", token.ExpiresIn)
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte("<!doctype html><title>Discord install complete</title><h1>Discord install complete</h1><p>You can close this tab and return to Discord.</p>"))
+}
+
+type discordTokenResponse struct {
+	AccessToken  string `json:"access_token"`
+	TokenType    string `json:"token_type"`
+	ExpiresIn    int    `json:"expires_in"`
+	RefreshToken string `json:"refresh_token"`
+	Scope        string `json:"scope"`
+}
+
+func (s *Server) exchangeDiscordCode(ctx context.Context, code string) (discordTokenResponse, error) {
+	form := url.Values{}
+	form.Set("grant_type", "authorization_code")
+	form.Set("code", code)
+	form.Set("redirect_uri", s.cfg.DiscordRedirectURI)
+
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, s.cfg.DiscordAPIBaseURL+"/oauth2/token", strings.NewReader(form.Encode()))
+	if err != nil {
+		return discordTokenResponse{}, err
+	}
+	request.SetBasicAuth(s.cfg.DiscordAppID, s.cfg.DiscordClientSecret)
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	request.Header.Set("Accept", "application/json")
+
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		return discordTokenResponse{}, err
+	}
+	defer response.Body.Close()
+
+	body, err := io.ReadAll(io.LimitReader(response.Body, 1<<20))
+	if err != nil {
+		return discordTokenResponse{}, err
+	}
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return discordTokenResponse{}, discordAPIError{StatusCode: response.StatusCode, Body: string(body)}
+	}
+
+	var token discordTokenResponse
+	if err := json.Unmarshal(body, &token); err != nil {
+		return discordTokenResponse{}, err
+	}
+	return token, nil
+}
+
+type discordAPIError struct {
+	StatusCode int
+	Body       string
+}
+
+func (e discordAPIError) Error() string {
+	return "discord api returned status " + http.StatusText(e.StatusCode) + ": " + e.Body
 }
 
 func (s *Server) discordInteraction(w http.ResponseWriter, r *http.Request) {
