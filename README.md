@@ -23,11 +23,11 @@ create wg-easy peers, and deliver single-use WireGuard configs.
 | `PUBLIC_BASE_URL` | none | Public one-time download base URL |
 | `DISCORD_APP_ID` | none | Discord application ID |
 | `DISCORD_PUBLIC_KEY` | none | Discord interaction signature public key |
-| `DISCORD_BOT_TOKEN` | none | Discord bot token |
+| `DISCORD_BOT_TOKEN` | none | Discord bot token for future outbound calls |
 | `AUTHENTIK_BASE_URL` | none | Authentik base URL |
-| `AUTHENTIK_TOKEN` | none | Authentik API token |
+| `AUTHENTIK_TOKEN` | none | Authentik API token for future provisioning |
 | `WGEASY_BASE_URL` | none | wg-easy base URL |
-| `WGEASY_PASSWORD` | none | wg-easy administrative password |
+| `WGEASY_PASSWORD` | none | wg-easy administrative password for future provisioning |
 | `ACCESS_STORE_PATH` | `/data/homelab-access.json` | Runtime access request store path |
 | `DATABASE_PATH` | none | Backward-compatible fallback for `ACCESS_STORE_PATH` |
 | `DOWNLOAD_TOKEN_TTL` | `15m` | Default one-time link TTL |
