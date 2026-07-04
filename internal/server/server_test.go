@@ -39,8 +39,29 @@ func TestReadyzReportsMissingRuntimeConfig(t *testing.T) {
 	if response.Code != http.StatusServiceUnavailable {
 		t.Fatalf("expected status %d, got %d", http.StatusServiceUnavailable, response.Code)
 	}
-	if !strings.Contains(response.Body.String(), "DISCORD_BOT_TOKEN") {
-		t.Fatalf("expected missing token in body: %s", response.Body.String())
+	if !strings.Contains(response.Body.String(), "DISCORD_PUBLIC_KEY") {
+		t.Fatalf("expected missing discord public key in body: %s", response.Body.String())
+	}
+	if strings.Contains(response.Body.String(), "DISCORD_BOT_TOKEN") {
+		t.Fatalf("did not expect future bot token to gate readiness: %s", response.Body.String())
+	}
+}
+
+func TestReadyzRequiresOnlyImplementedRuntimeConfig(t *testing.T) {
+	handler := testHandler(t, config.Config{
+		HTTPAddr:         ":8080",
+		PublicBaseURL:    "https://onboard.petebeegle.com",
+		DiscordAppID:     "1523044601429102622",
+		DiscordPublicKey: strings.Repeat("0", 64),
+	})
+
+	request := httptest.NewRequest(http.MethodGet, "/readyz", nil)
+	response := httptest.NewRecorder()
+
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusOK, response.Code, response.Body.String())
 	}
 }
 

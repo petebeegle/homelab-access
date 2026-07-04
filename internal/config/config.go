@@ -58,11 +58,6 @@ func (c Config) MissingRuntimeKeys() []string {
 		"PUBLIC_BASE_URL":    c.PublicBaseURL,
 		"DISCORD_APP_ID":     c.DiscordAppID,
 		"DISCORD_PUBLIC_KEY": c.DiscordPublicKey,
-		"DISCORD_BOT_TOKEN":  c.DiscordBotToken,
-		"AUTHENTIK_BASE_URL": c.AuthentikBaseURL,
-		"AUTHENTIK_TOKEN":    c.AuthentikToken,
-		"WGEASY_BASE_URL":    c.WGEasyBaseURL,
-		"WGEASY_PASSWORD":    c.WGEasyPassword,
 	}
 
 	missing := make([]string, 0)
