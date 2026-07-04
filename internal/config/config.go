@@ -16,6 +16,8 @@ type Config struct {
 	DiscordClientSecret string
 	DiscordRedirectURI  string
 	DiscordAPIBaseURL   string
+	DiscordAdminUserIDs []string
+	DiscordAdminRoleIDs []string
 	AuthentikBaseURL    string
 	AuthentikToken      string
 	WGEasyBaseURL       string
@@ -34,6 +36,8 @@ func Load() (Config, error) {
 		DiscordBotToken:     os.Getenv("DISCORD_BOT_TOKEN"),
 		DiscordClientSecret: os.Getenv("DISCORD_CLIENT_SECRET"),
 		DiscordAPIBaseURL:   strings.TrimRight(getEnv("DISCORD_API_BASE_URL", "https://discord.com/api/v10"), "/"),
+		DiscordAdminUserIDs: splitCSV(os.Getenv("DISCORD_ADMIN_USER_IDS")),
+		DiscordAdminRoleIDs: splitCSV(os.Getenv("DISCORD_ADMIN_ROLE_IDS")),
 		AuthentikBaseURL:    strings.TrimRight(os.Getenv("AUTHENTIK_BASE_URL"), "/"),
 		AuthentikToken:      os.Getenv("AUTHENTIK_TOKEN"),
 		WGEasyBaseURL:       strings.TrimRight(os.Getenv("WGEASY_BASE_URL"), "/"),
@@ -85,4 +89,16 @@ func getEnv(key, fallback string) string {
 		return fallback
 	}
 	return value
+}
+
+func splitCSV(value string) []string {
+	parts := strings.Split(value, ",")
+	values := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			values = append(values, part)
+		}
+	}
+	return values
 }

@@ -306,8 +306,9 @@ func TestDiscordAccessApproveCommand(t *testing.T) {
 	}
 
 	handler := testHandler(t, config.Config{
-		HTTPAddr:         ":8080",
-		DiscordPublicKey: hex.EncodeToString(publicKey),
+		HTTPAddr:            ":8080",
+		DiscordPublicKey:    hex.EncodeToString(publicKey),
+		DiscordAdminUserIDs: []string{"admin-1"},
 	})
 
 	createBody := `{
@@ -367,6 +368,57 @@ func TestDiscordAccessApproveCommand(t *testing.T) {
 	}
 }
 
+func TestDiscordAccessApproveCommandRejectsUnauthorizedUser(t *testing.T) {
+	publicKey, privateKey, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	handler := testHandler(t, config.Config{
+		HTTPAddr:            ":8080",
+		DiscordPublicKey:    hex.EncodeToString(publicKey),
+		DiscordAdminUserIDs: []string{"admin-1"},
+	})
+
+	createBody := `{
+		"type": 2,
+		"member": {
+			"user": {"id": "user-1", "username": "alice"}
+		},
+		"data": {
+			"name": "access",
+			"options": [
+				{"name": "request", "type": 1}
+			]
+		}
+	}`
+	createResponse := httptest.NewRecorder()
+	handler.ServeHTTP(createResponse, signedDiscordRequest(t, privateKey, createBody))
+	if createResponse.Code != http.StatusOK {
+		t.Fatalf("expected create status %d, got %d: %s", http.StatusOK, createResponse.Code, createResponse.Body.String())
+	}
+
+	requestID := extractRequestID(t, createResponse.Body.String())
+	unauthorizedBody := accessReviewBody("approve", requestID, "user-2")
+	unauthorizedResponse := httptest.NewRecorder()
+	handler.ServeHTTP(unauthorizedResponse, signedDiscordRequest(t, privateKey, unauthorizedBody))
+	if unauthorizedResponse.Code != http.StatusOK {
+		t.Fatalf("expected unauthorized status %d, got %d: %s", http.StatusOK, unauthorizedResponse.Code, unauthorizedResponse.Body.String())
+	}
+	if !strings.Contains(unauthorizedResponse.Body.String(), "not allowed") {
+		t.Fatalf("expected not allowed response, got: %s", unauthorizedResponse.Body.String())
+	}
+
+	approveResponse := httptest.NewRecorder()
+	handler.ServeHTTP(approveResponse, signedDiscordRequest(t, privateKey, accessReviewBody("approve", requestID, "admin-1")))
+	if approveResponse.Code != http.StatusOK {
+		t.Fatalf("expected approve status %d, got %d: %s", http.StatusOK, approveResponse.Code, approveResponse.Body.String())
+	}
+	if !strings.Contains(approveResponse.Body.String(), "approved") {
+		t.Fatalf("expected approval response after unauthorized attempt, got: %s", approveResponse.Body.String())
+	}
+}
+
 func testHandler(t *testing.T, cfg config.Config) http.Handler {
 	t.Helper()
 
@@ -387,6 +439,27 @@ func signedDiscordRequest(t *testing.T, privateKey ed25519.PrivateKey, body stri
 	request.Header.Set("X-Signature-Timestamp", timestamp)
 	request.Header.Set("X-Signature-Ed25519", hex.EncodeToString(signature))
 	return request
+}
+
+func accessReviewBody(command, requestID, userID string) string {
+	return `{
+		"type": 2,
+		"member": {
+			"user": {"id": "` + userID + `", "username": "reviewer"}
+		},
+		"data": {
+			"name": "access",
+			"options": [
+				{
+					"name": "` + command + `",
+					"type": 1,
+					"options": [
+						{"name": "request_id", "type": 3, "value": "` + requestID + `"}
+					]
+				}
+			]
+		}
+	}`
 }
 
 func extractRequestID(t *testing.T, body string) string {

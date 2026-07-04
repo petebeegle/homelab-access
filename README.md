@@ -24,6 +24,8 @@ create wg-easy peers, and deliver single-use WireGuard configs.
 | `DISCORD_APP_ID` | none | Discord application ID |
 | `DISCORD_PUBLIC_KEY` | none | Discord interaction signature public key |
 | `DISCORD_BOT_TOKEN` | none | Discord bot token for future outbound calls |
+| `DISCORD_ADMIN_USER_IDS` | none | Comma-separated Discord user IDs allowed to approve or deny access requests |
+| `DISCORD_ADMIN_ROLE_IDS` | none | Comma-separated Discord role IDs allowed to approve or deny access requests |
 | `AUTHENTIK_BASE_URL` | none | Authentik base URL |
 | `AUTHENTIK_TOKEN` | none | Authentik API token for future provisioning |
 | `WGEASY_BASE_URL` | none | wg-easy base URL |

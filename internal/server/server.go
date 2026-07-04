@@ -251,6 +251,11 @@ func (s *Server) reviewAccessRequest(w http.ResponseWriter, interaction discord.
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "interaction user is required"})
 		return
 	}
+	if !s.canReviewAccess(interaction) {
+		s.logger.Warn("discord user attempted access review without authorization", "reviewer_id", reviewerID, "guild_id", interaction.GuildID)
+		writeJSON(w, http.StatusOK, discord.EphemeralMessage("You are not allowed to review access requests."))
+		return
+	}
 
 	requestID := discord.StringOption(interaction, "request_id")
 	if requestID == "" {
@@ -291,6 +296,26 @@ func (s *Server) reviewAccessRequest(w http.ResponseWriter, interaction discord.
 		return
 	}
 	writeJSON(w, http.StatusOK, discord.EphemeralMessage("Access request "+request.ID+" denied."))
+}
+
+func (s *Server) canReviewAccess(interaction discord.Interaction) bool {
+	userID := discord.UserID(interaction)
+	for _, adminUserID := range s.cfg.DiscordAdminUserIDs {
+		if userID == adminUserID {
+			return true
+		}
+	}
+	if interaction.Member == nil {
+		return false
+	}
+	for _, roleID := range interaction.Member.Roles {
+		for _, adminRoleID := range s.cfg.DiscordAdminRoleIDs {
+			if roleID == adminRoleID {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (s *Server) notImplemented(message string) http.HandlerFunc {
