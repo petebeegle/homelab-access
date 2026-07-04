@@ -121,6 +121,25 @@ func UserID(interaction Interaction) string {
 	return ""
 }
 
+func DisplayName(interaction Interaction) string {
+	var user *User
+	if interaction.Member != nil && interaction.Member.User != nil {
+		user = interaction.Member.User
+	} else {
+		user = interaction.User
+	}
+	if user == nil {
+		return ""
+	}
+	if user.GlobalName != "" {
+		return user.GlobalName
+	}
+	if user.Username != "" {
+		return user.Username
+	}
+	return user.ID
+}
+
 func CommandPath(interaction Interaction) string {
 	if interaction.Data == nil {
 		return ""

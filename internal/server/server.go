@@ -9,6 +9,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/petebeegle/homelab-access/internal/access"
 	"github.com/petebeegle/homelab-access/internal/config"
 	"github.com/petebeegle/homelab-access/internal/discord"
 )
@@ -16,14 +17,25 @@ import (
 type Server struct {
 	cfg       config.Config
 	logger    *slog.Logger
+	store     access.Store
 	startedAt time.Time
 	requests  atomic.Uint64
 }
 
-func New(cfg config.Config, logger *slog.Logger) http.Handler {
+func New(cfg config.Config, logger *slog.Logger) (http.Handler, error) {
+	store, err := access.OpenFileStore(cfg.StorePath)
+	if err != nil {
+		return nil, err
+	}
+
+	return NewWithStore(cfg, logger, store), nil
+}
+
+func NewWithStore(cfg config.Config, logger *slog.Logger, store access.Store) http.Handler {
 	s := &Server{
 		cfg:       cfg,
 		logger:    logger,
+		store:     store,
 		startedAt: time.Now().UTC(),
 	}
 
@@ -119,8 +131,24 @@ func (s *Server) handleApplicationCommand(w http.ResponseWriter, interaction dis
 			return
 		}
 
-		s.logger.Info("access request received", "discord_user_id", userID, "guild_id", interaction.GuildID, "channel_id", interaction.ChannelID)
-		writeJSON(w, http.StatusOK, discord.EphemeralMessage("Access request received. An admin will review it before any Authentik account or VPN configuration is created."))
+		request, created, err := s.store.CreateOrGetPending(access.RequestInput{
+			DiscordUserID: userID,
+			DiscordName:   discord.DisplayName(interaction),
+			GuildID:       interaction.GuildID,
+			ChannelID:     interaction.ChannelID,
+		})
+		if err != nil {
+			s.logger.Error("failed to create access request", "error", err)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to create access request"})
+			return
+		}
+
+		s.logger.Info("access request received", "request_id", request.ID, "created", created, "discord_user_id", userID, "guild_id", interaction.GuildID, "channel_id", interaction.ChannelID)
+		if created {
+			writeJSON(w, http.StatusOK, discord.EphemeralMessage("Access request "+request.ID+" received. An admin will review it before any Authentik account or VPN configuration is created."))
+			return
+		}
+		writeJSON(w, http.StatusOK, discord.EphemeralMessage("You already have pending access request "+request.ID+". An admin will review it before any Authentik account or VPN configuration is created."))
 	default:
 		writeJSON(w, http.StatusOK, discord.EphemeralMessage("Unknown access command. Try `/access request`."))
 	}

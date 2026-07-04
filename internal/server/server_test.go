@@ -13,7 +13,7 @@ import (
 )
 
 func TestHealthz(t *testing.T) {
-	handler := New(config.Config{HTTPAddr: ":8080", DatabasePath: "/tmp/test.db"}, slog.Default())
+	handler := testHandler(t, config.Config{HTTPAddr: ":8080"})
 
 	request := httptest.NewRequest(http.MethodGet, "/healthz", nil)
 	response := httptest.NewRecorder()
@@ -29,7 +29,7 @@ func TestHealthz(t *testing.T) {
 }
 
 func TestReadyzReportsMissingRuntimeConfig(t *testing.T) {
-	handler := New(config.Config{HTTPAddr: ":8080", DatabasePath: "/tmp/test.db"}, slog.Default())
+	handler := testHandler(t, config.Config{HTTPAddr: ":8080"})
 
 	request := httptest.NewRequest(http.MethodGet, "/readyz", nil)
 	response := httptest.NewRecorder()
@@ -45,7 +45,7 @@ func TestReadyzReportsMissingRuntimeConfig(t *testing.T) {
 }
 
 func TestMetrics(t *testing.T) {
-	handler := New(config.Config{HTTPAddr: ":8080", DatabasePath: "/tmp/test.db"}, slog.Default())
+	handler := testHandler(t, config.Config{HTTPAddr: ":8080"})
 
 	request := httptest.NewRequest(http.MethodGet, "/metrics", nil)
 	response := httptest.NewRecorder()
@@ -67,11 +67,10 @@ func TestDiscordInteractionPing(t *testing.T) {
 	}
 
 	body := `{"type":1}`
-	handler := New(config.Config{
+	handler := testHandler(t, config.Config{
 		HTTPAddr:         ":8080",
-		DatabasePath:     "/tmp/test.db",
 		DiscordPublicKey: hex.EncodeToString(publicKey),
-	}, slog.Default())
+	})
 
 	request := signedDiscordRequest(t, privateKey, body)
 	response := httptest.NewRecorder()
@@ -96,11 +95,10 @@ func TestDiscordInteractionRejectsBadSignature(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	handler := New(config.Config{
+	handler := testHandler(t, config.Config{
 		HTTPAddr:         ":8080",
-		DatabasePath:     "/tmp/test.db",
 		DiscordPublicKey: hex.EncodeToString(publicKey),
-	}, slog.Default())
+	})
 
 	request := signedDiscordRequest(t, wrongPrivateKey, `{"type":1}`)
 	response := httptest.NewRecorder()
@@ -135,11 +133,10 @@ func TestDiscordAccessRequestCommand(t *testing.T) {
 			]
 		}
 	}`
-	handler := New(config.Config{
+	handler := testHandler(t, config.Config{
 		HTTPAddr:         ":8080",
-		DatabasePath:     "/tmp/test.db",
 		DiscordPublicKey: hex.EncodeToString(publicKey),
-	}, slog.Default())
+	})
 
 	request := signedDiscordRequest(t, privateKey, body)
 	response := httptest.NewRecorder()
@@ -152,9 +149,62 @@ func TestDiscordAccessRequestCommand(t *testing.T) {
 	if !strings.Contains(response.Body.String(), `"flags":64`) {
 		t.Fatalf("expected ephemeral response: %s", response.Body.String())
 	}
-	if !strings.Contains(response.Body.String(), "Access request received") {
+	if !strings.Contains(response.Body.String(), "Access request req_") {
 		t.Fatalf("unexpected body: %s", response.Body.String())
 	}
+}
+
+func TestDiscordAccessRequestCommandReusesPendingRequest(t *testing.T) {
+	publicKey, privateKey, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	body := `{
+		"type": 2,
+		"member": {
+			"user": {"id": "user-1", "username": "alice"}
+		},
+		"data": {
+			"name": "access",
+			"options": [
+				{
+					"name": "request",
+					"type": 1
+				}
+			]
+		}
+	}`
+	handler := testHandler(t, config.Config{
+		HTTPAddr:         ":8080",
+		DiscordPublicKey: hex.EncodeToString(publicKey),
+	})
+
+	first := httptest.NewRecorder()
+	handler.ServeHTTP(first, signedDiscordRequest(t, privateKey, body))
+	if first.Code != http.StatusOK {
+		t.Fatalf("expected first status %d, got %d: %s", http.StatusOK, first.Code, first.Body.String())
+	}
+
+	second := httptest.NewRecorder()
+	handler.ServeHTTP(second, signedDiscordRequest(t, privateKey, body))
+	if second.Code != http.StatusOK {
+		t.Fatalf("expected second status %d, got %d: %s", http.StatusOK, second.Code, second.Body.String())
+	}
+	if !strings.Contains(second.Body.String(), "already have pending access request") {
+		t.Fatalf("unexpected duplicate body: %s", second.Body.String())
+	}
+}
+
+func testHandler(t *testing.T, cfg config.Config) http.Handler {
+	t.Helper()
+
+	cfg.StorePath = t.TempDir() + "/requests.json"
+	handler, err := New(cfg, slog.Default())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return handler
 }
 
 func signedDiscordRequest(t *testing.T, privateKey ed25519.PrivateKey, body string) *http.Request {
