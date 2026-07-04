@@ -304,11 +304,15 @@ func TestDiscordAccessApproveCommand(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	authentikServer := fakeAuthentikServer(t)
+	defer authentikServer.Close()
 
 	handler := testHandler(t, config.Config{
 		HTTPAddr:            ":8080",
 		DiscordPublicKey:    hex.EncodeToString(publicKey),
 		DiscordAdminUserIDs: []string{"admin-1"},
+		AuthentikBaseURL:    authentikServer.URL,
+		AuthentikToken:      "token-1",
 	})
 
 	createBody := `{
@@ -373,11 +377,15 @@ func TestDiscordAccessApproveCommandRejectsUnauthorizedUser(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	authentikServer := fakeAuthentikServer(t)
+	defer authentikServer.Close()
 
 	handler := testHandler(t, config.Config{
 		HTTPAddr:            ":8080",
 		DiscordPublicKey:    hex.EncodeToString(publicKey),
 		DiscordAdminUserIDs: []string{"admin-1"},
+		AuthentikBaseURL:    authentikServer.URL,
+		AuthentikToken:      "token-1",
 	})
 
 	createBody := `{
@@ -460,6 +468,30 @@ func accessReviewBody(command, requestID, userID string) string {
 			]
 		}
 	}`
+}
+
+func fakeAuthentikServer(t *testing.T) *httptest.Server {
+	t.Helper()
+
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer token-1" {
+			t.Fatalf("unexpected authorization header: %s", r.Header.Get("Authorization"))
+		}
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v3/core/users/":
+			_ = json.NewEncoder(w).Encode(map[string]any{"results": []any{}})
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v3/core/users/":
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"pk":        1,
+				"username":  "discord-user-1",
+				"name":      "alice",
+				"is_active": true,
+			})
+		default:
+			t.Fatalf("unexpected authentik request: %s %s", r.Method, r.URL.String())
+		}
+	}))
 }
 
 func extractRequestID(t *testing.T, body string) string {

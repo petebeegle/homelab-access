@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/petebeegle/homelab-access/internal/access"
+	"github.com/petebeegle/homelab-access/internal/authentik"
 	"github.com/petebeegle/homelab-access/internal/config"
 	"github.com/petebeegle/homelab-access/internal/discord"
 )
@@ -21,6 +22,7 @@ type Server struct {
 	cfg       config.Config
 	logger    *slog.Logger
 	store     access.Store
+	authentik *authentik.Client
 	startedAt time.Time
 	requests  atomic.Uint64
 }
@@ -39,6 +41,7 @@ func NewWithStore(cfg config.Config, logger *slog.Logger, store access.Store) ht
 		cfg:       cfg,
 		logger:    logger,
 		store:     store,
+		authentik: authentik.New(cfg.AuthentikBaseURL, cfg.AuthentikToken),
 		startedAt: time.Now().UTC(),
 	}
 
@@ -269,6 +272,18 @@ func (s *Server) reviewAccessRequest(w http.ResponseWriter, interaction discord.
 	)
 	switch status {
 	case access.StatusApproved:
+		pendingRequest, err := s.store.GetPending(requestID)
+		if err != nil {
+			s.handleReviewError(w, err, requestID)
+			return
+		}
+		user, created, err := s.authentik.EnsureUser(context.Background(), pendingRequest)
+		if err != nil {
+			s.logger.Error("failed to provision authentik user", "error", err, "request_id", requestID)
+			writeJSON(w, http.StatusOK, discord.EphemeralMessage("Access request "+requestID+" is still pending because Authentik provisioning failed."))
+			return
+		}
+		s.logger.Info("authentik user ensured", "request_id", requestID, "authentik_user_id", user.ID, "authentik_username", user.Username, "created", created)
 		request, err = s.store.Approve(requestID, reviewerID)
 	case access.StatusDenied:
 		request, err = s.store.Deny(requestID, reviewerID)
@@ -278,24 +293,28 @@ func (s *Server) reviewAccessRequest(w http.ResponseWriter, interaction discord.
 	}
 
 	if err != nil {
-		switch {
-		case errors.Is(err, access.ErrRequestNotFound):
-			writeJSON(w, http.StatusOK, discord.EphemeralMessage("No access request found for "+requestID+"."))
-		case errors.Is(err, access.ErrRequestNotPending):
-			writeJSON(w, http.StatusOK, discord.EphemeralMessage("Access request "+requestID+" has already been reviewed."))
-		default:
-			s.logger.Error("failed to review access request", "error", err, "request_id", requestID, "status", status)
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to review access request"})
-		}
+		s.handleReviewError(w, err, requestID)
 		return
 	}
 
 	s.logger.Info("access request reviewed", "request_id", request.ID, "status", request.Status, "reviewer_id", reviewerID, "discord_user_id", request.DiscordUserID)
 	if status == access.StatusApproved {
-		writeJSON(w, http.StatusOK, discord.EphemeralMessage("Access request "+request.ID+" approved. Authentik and VPN provisioning are not wired yet."))
+		writeJSON(w, http.StatusOK, discord.EphemeralMessage("Access request "+request.ID+" approved. Authentik user is ready; VPN provisioning is not wired yet."))
 		return
 	}
 	writeJSON(w, http.StatusOK, discord.EphemeralMessage("Access request "+request.ID+" denied."))
+}
+
+func (s *Server) handleReviewError(w http.ResponseWriter, err error, requestID string) {
+	switch {
+	case errors.Is(err, access.ErrRequestNotFound):
+		writeJSON(w, http.StatusOK, discord.EphemeralMessage("No access request found for "+requestID+"."))
+	case errors.Is(err, access.ErrRequestNotPending):
+		writeJSON(w, http.StatusOK, discord.EphemeralMessage("Access request "+requestID+" has already been reviewed."))
+	default:
+		s.logger.Error("failed to review access request", "error", err, "request_id", requestID)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to review access request"})
+	}
 }
 
 func (s *Server) canReviewAccess(interaction discord.Interaction) bool {

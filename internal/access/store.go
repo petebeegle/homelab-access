@@ -45,6 +45,7 @@ type RequestInput struct {
 
 type Store interface {
 	CreateOrGetPending(input RequestInput) (Request, bool, error)
+	GetPending(id string) (Request, error)
 	Approve(id, reviewerID string) (Request, error)
 	Deny(id, reviewerID string) (Request, error)
 }
@@ -111,6 +112,26 @@ func (s *FileStore) CreateOrGetPending(input RequestInput) (Request, bool, error
 	}
 
 	return request, true, nil
+}
+
+func (s *FileStore) GetPending(id string) (Request, error) {
+	if id == "" {
+		return Request{}, ErrRequestNotFound
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for _, request := range s.data.Requests {
+		if request.ID != id {
+			continue
+		}
+		if request.Status != StatusPending {
+			return Request{}, ErrRequestNotPending
+		}
+		return request, nil
+	}
+	return Request{}, ErrRequestNotFound
 }
 
 func (s *FileStore) Approve(id, reviewerID string) (Request, error) {
