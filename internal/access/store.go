@@ -11,9 +11,17 @@ import (
 	"time"
 )
 
-const StatusPending = "pending"
+const (
+	StatusPending  = "pending"
+	StatusApproved = "approved"
+	StatusDenied   = "denied"
+)
 
-var ErrStorePathRequired = errors.New("store path is required")
+var (
+	ErrRequestNotFound   = errors.New("request not found")
+	ErrRequestNotPending = errors.New("request is not pending")
+	ErrStorePathRequired = errors.New("store path is required")
+)
 
 type Request struct {
 	ID            string    `json:"id"`
@@ -22,6 +30,8 @@ type Request struct {
 	GuildID       string    `json:"guild_id,omitempty"`
 	ChannelID     string    `json:"channel_id,omitempty"`
 	Status        string    `json:"status"`
+	ReviewedBy    string    `json:"reviewed_by,omitempty"`
+	ReviewedAt    time.Time `json:"reviewed_at,omitempty"`
 	CreatedAt     time.Time `json:"created_at"`
 	UpdatedAt     time.Time `json:"updated_at"`
 }
@@ -35,6 +45,8 @@ type RequestInput struct {
 
 type Store interface {
 	CreateOrGetPending(input RequestInput) (Request, bool, error)
+	Approve(id, reviewerID string) (Request, error)
+	Deny(id, reviewerID string) (Request, error)
 }
 
 type FileStore struct {
@@ -99,6 +111,49 @@ func (s *FileStore) CreateOrGetPending(input RequestInput) (Request, bool, error
 	}
 
 	return request, true, nil
+}
+
+func (s *FileStore) Approve(id, reviewerID string) (Request, error) {
+	return s.review(id, reviewerID, StatusApproved)
+}
+
+func (s *FileStore) Deny(id, reviewerID string) (Request, error) {
+	return s.review(id, reviewerID, StatusDenied)
+}
+
+func (s *FileStore) review(id, reviewerID, status string) (Request, error) {
+	if id == "" {
+		return Request{}, ErrRequestNotFound
+	}
+	if reviewerID == "" {
+		return Request{}, errors.New("reviewer id is required")
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for i := range s.data.Requests {
+		if s.data.Requests[i].ID != id {
+			continue
+		}
+		if s.data.Requests[i].Status != StatusPending {
+			return Request{}, ErrRequestNotPending
+		}
+
+		previous := s.data.Requests[i]
+		now := s.now()
+		s.data.Requests[i].Status = status
+		s.data.Requests[i].ReviewedBy = reviewerID
+		s.data.Requests[i].ReviewedAt = now
+		s.data.Requests[i].UpdatedAt = now
+		if err := s.saveLocked(); err != nil {
+			s.data.Requests[i] = previous
+			return Request{}, err
+		}
+		return s.data.Requests[i], nil
+	}
+
+	return Request{}, ErrRequestNotFound
 }
 
 func (s *FileStore) load() error {

@@ -2,6 +2,7 @@ package access
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -83,5 +84,40 @@ func TestFileStoreReloadsRequests(t *testing.T) {
 	}
 	if duplicate.ID != request.ID {
 		t.Fatalf("expected %q, got %q", request.ID, duplicate.ID)
+	}
+}
+
+func TestFileStoreReviewsPendingRequest(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "requests.json")
+	store, err := OpenFileStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	createdAt := time.Date(2026, 7, 4, 19, 15, 0, 0, time.UTC)
+	reviewedAt := createdAt.Add(5 * time.Minute)
+	store.now = func() time.Time { return createdAt }
+	request, _, err := store.CreateOrGetPending(RequestInput{DiscordUserID: "user-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	store.now = func() time.Time { return reviewedAt }
+	approved, err := store.Approve(request.ID, "admin-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if approved.Status != StatusApproved {
+		t.Fatalf("expected approved status, got %q", approved.Status)
+	}
+	if approved.ReviewedBy != "admin-1" {
+		t.Fatalf("expected reviewer admin-1, got %q", approved.ReviewedBy)
+	}
+	if !approved.ReviewedAt.Equal(reviewedAt) {
+		t.Fatalf("expected reviewed_at %s, got %s", reviewedAt, approved.ReviewedAt)
+	}
+
+	if _, err := store.Deny(request.ID, "admin-2"); !errors.Is(err, ErrRequestNotPending) {
+		t.Fatalf("expected ErrRequestNotPending, got %v", err)
 	}
 }
