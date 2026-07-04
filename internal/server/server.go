@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -235,9 +236,61 @@ func (s *Server) handleApplicationCommand(w http.ResponseWriter, interaction dis
 			return
 		}
 		writeJSON(w, http.StatusOK, discord.EphemeralMessage("You already have pending access request "+request.ID+". An admin will review it before any Authentik account or VPN configuration is created."))
+	case "access approve":
+		s.reviewAccessRequest(w, interaction, access.StatusApproved)
+	case "access deny":
+		s.reviewAccessRequest(w, interaction, access.StatusDenied)
 	default:
 		writeJSON(w, http.StatusOK, discord.EphemeralMessage("Unknown access command. Try `/access request`."))
 	}
+}
+
+func (s *Server) reviewAccessRequest(w http.ResponseWriter, interaction discord.Interaction, status string) {
+	reviewerID := discord.UserID(interaction)
+	if reviewerID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "interaction user is required"})
+		return
+	}
+
+	requestID := discord.StringOption(interaction, "request_id")
+	if requestID == "" {
+		writeJSON(w, http.StatusOK, discord.EphemeralMessage("Request ID is required."))
+		return
+	}
+
+	var (
+		request access.Request
+		err     error
+	)
+	switch status {
+	case access.StatusApproved:
+		request, err = s.store.Approve(requestID, reviewerID)
+	case access.StatusDenied:
+		request, err = s.store.Deny(requestID, reviewerID)
+	default:
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "unsupported review status"})
+		return
+	}
+
+	if err != nil {
+		switch {
+		case errors.Is(err, access.ErrRequestNotFound):
+			writeJSON(w, http.StatusOK, discord.EphemeralMessage("No access request found for "+requestID+"."))
+		case errors.Is(err, access.ErrRequestNotPending):
+			writeJSON(w, http.StatusOK, discord.EphemeralMessage("Access request "+requestID+" has already been reviewed."))
+		default:
+			s.logger.Error("failed to review access request", "error", err, "request_id", requestID, "status", status)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to review access request"})
+		}
+		return
+	}
+
+	s.logger.Info("access request reviewed", "request_id", request.ID, "status", request.Status, "reviewer_id", reviewerID, "discord_user_id", request.DiscordUserID)
+	if status == access.StatusApproved {
+		writeJSON(w, http.StatusOK, discord.EphemeralMessage("Access request "+request.ID+" approved. Authentik and VPN provisioning are not wired yet."))
+		return
+	}
+	writeJSON(w, http.StatusOK, discord.EphemeralMessage("Access request "+request.ID+" denied."))
 }
 
 func (s *Server) notImplemented(message string) http.HandlerFunc {

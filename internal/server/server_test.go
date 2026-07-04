@@ -299,6 +299,74 @@ func TestDiscordAccessRequestCommandReusesPendingRequest(t *testing.T) {
 	}
 }
 
+func TestDiscordAccessApproveCommand(t *testing.T) {
+	publicKey, privateKey, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	handler := testHandler(t, config.Config{
+		HTTPAddr:         ":8080",
+		DiscordPublicKey: hex.EncodeToString(publicKey),
+	})
+
+	createBody := `{
+		"type": 2,
+		"member": {
+			"user": {"id": "user-1", "username": "alice"}
+		},
+		"data": {
+			"name": "access",
+			"options": [
+				{"name": "request", "type": 1}
+			]
+		}
+	}`
+	createResponse := httptest.NewRecorder()
+	handler.ServeHTTP(createResponse, signedDiscordRequest(t, privateKey, createBody))
+	if createResponse.Code != http.StatusOK {
+		t.Fatalf("expected create status %d, got %d: %s", http.StatusOK, createResponse.Code, createResponse.Body.String())
+	}
+
+	requestID := extractRequestID(t, createResponse.Body.String())
+	approveBody := `{
+		"type": 2,
+		"member": {
+			"user": {"id": "admin-1", "username": "admin"}
+		},
+		"data": {
+			"name": "access",
+			"options": [
+				{
+					"name": "approve",
+					"type": 1,
+					"options": [
+						{"name": "request_id", "type": 3, "value": "` + requestID + `"}
+					]
+				}
+			]
+		}
+	}`
+	approveResponse := httptest.NewRecorder()
+	handler.ServeHTTP(approveResponse, signedDiscordRequest(t, privateKey, approveBody))
+
+	if approveResponse.Code != http.StatusOK {
+		t.Fatalf("expected approve status %d, got %d: %s", http.StatusOK, approveResponse.Code, approveResponse.Body.String())
+	}
+	if !strings.Contains(approveResponse.Body.String(), "approved") {
+		t.Fatalf("expected approval response, got: %s", approveResponse.Body.String())
+	}
+
+	duplicateResponse := httptest.NewRecorder()
+	handler.ServeHTTP(duplicateResponse, signedDiscordRequest(t, privateKey, approveBody))
+	if duplicateResponse.Code != http.StatusOK {
+		t.Fatalf("expected duplicate status %d, got %d: %s", http.StatusOK, duplicateResponse.Code, duplicateResponse.Body.String())
+	}
+	if !strings.Contains(duplicateResponse.Body.String(), "already been reviewed") {
+		t.Fatalf("expected already reviewed response, got: %s", duplicateResponse.Body.String())
+	}
+}
+
 func testHandler(t *testing.T, cfg config.Config) http.Handler {
 	t.Helper()
 
@@ -319,4 +387,23 @@ func signedDiscordRequest(t *testing.T, privateKey ed25519.PrivateKey, body stri
 	request.Header.Set("X-Signature-Timestamp", timestamp)
 	request.Header.Set("X-Signature-Ed25519", hex.EncodeToString(signature))
 	return request
+}
+
+func extractRequestID(t *testing.T, body string) string {
+	t.Helper()
+
+	start := strings.Index(body, "req_")
+	if start == -1 {
+		t.Fatalf("request id not found in body: %s", body)
+	}
+	end := start
+	for end < len(body) {
+		current := body[end]
+		if (current >= 'a' && current <= 'z') || (current >= '0' && current <= '9') || current == '_' {
+			end++
+			continue
+		}
+		break
+	}
+	return body[start:end]
 }

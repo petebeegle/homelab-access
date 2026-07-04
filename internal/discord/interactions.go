@@ -159,6 +159,37 @@ func CommandPath(interaction Interaction) string {
 	return strings.Join(parts, " ")
 }
 
+func StringOption(interaction Interaction, name string) string {
+	options := commandLeafOptions(interaction)
+	for _, option := range options {
+		if option.Name != name {
+			continue
+		}
+		var value string
+		if err := json.Unmarshal(option.Value, &value); err != nil {
+			return ""
+		}
+		return value
+	}
+	return ""
+}
+
+func commandLeafOptions(interaction Interaction) []Option {
+	if interaction.Data == nil {
+		return nil
+	}
+
+	options := interaction.Data.Options
+	for len(options) > 0 {
+		current := options[0]
+		if current.Type != 1 && current.Type != 2 {
+			break
+		}
+		options = current.Options
+	}
+	return options
+}
+
 func EphemeralMessage(content string) InteractionResponse {
 	return InteractionResponse{
 		Type: ResponseTypeChannelMessageWithSource,
