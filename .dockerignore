@@ -1,0 +1,6 @@
+.git/
+.github/
+tmp/
+*.log
+coverage.out
+homelab-access
