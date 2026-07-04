@@ -103,6 +103,14 @@ func TestFileStoreReviewsPendingRequest(t *testing.T) {
 	}
 
 	store.now = func() time.Time { return reviewedAt }
+	pending, err := store.GetPending(request.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pending.ID != request.ID {
+		t.Fatalf("expected pending request %q, got %q", request.ID, pending.ID)
+	}
+
 	approved, err := store.Approve(request.ID, "admin-1")
 	if err != nil {
 		t.Fatal(err)
@@ -119,5 +127,8 @@ func TestFileStoreReviewsPendingRequest(t *testing.T) {
 
 	if _, err := store.Deny(request.ID, "admin-2"); !errors.Is(err, ErrRequestNotPending) {
 		t.Fatalf("expected ErrRequestNotPending, got %v", err)
+	}
+	if _, err := store.GetPending(request.ID); !errors.Is(err, ErrRequestNotPending) {
+		t.Fatalf("expected reviewed request to stop being pending, got %v", err)
 	}
 }
