@@ -1,0 +1,8 @@
+*.exe
+*.test
+*.out
+coverage.out
+/homelab-access
+tmp/
+.env
+.env.*
