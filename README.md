@@ -7,12 +7,13 @@ The foundation build exposes:
 - `GET /healthz`
 - `GET /readyz`
 - `GET /metrics`
-- `POST /discord/interactions` placeholder
+- `POST /discord/interactions`
 - `GET /download/{token}` placeholder
 
-Future builds will implement admin-approved Discord access requests, Authentik
-invite enrollment, wg-easy peer creation, and single-use WireGuard config
-delivery.
+The Discord endpoint validates Discord Ed25519 signatures, answers PING with
+PONG, and acknowledges `/access request` with an ephemeral message. Future
+builds will persist admin-approved requests, create Authentik invitations,
+create wg-easy peers, and deliver single-use WireGuard configs.
 
 ## Configuration
 
