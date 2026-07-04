@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"io"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -9,6 +10,7 @@ import (
 	"time"
 
 	"github.com/petebeegle/homelab-access/internal/config"
+	"github.com/petebeegle/homelab-access/internal/discord"
 )
 
 type Server struct {
@@ -29,7 +31,7 @@ func New(cfg config.Config, logger *slog.Logger) http.Handler {
 	mux.HandleFunc("GET /healthz", s.healthz)
 	mux.HandleFunc("GET /readyz", s.readyz)
 	mux.HandleFunc("GET /metrics", s.metrics)
-	mux.HandleFunc("POST /discord/interactions", s.notImplemented("discord interactions are not implemented in the foundation build"))
+	mux.HandleFunc("POST /discord/interactions", s.discordInteraction)
 	mux.HandleFunc("GET /download/{token}", s.notImplemented("one-time VPN downloads are not implemented in the foundation build"))
 	mux.HandleFunc("/", s.notFound)
 
@@ -68,6 +70,60 @@ func (s *Server) metrics(w http.ResponseWriter, _ *http.Request) {
 	_, _ = w.Write([]byte("# HELP homelab_access_http_requests_total HTTP requests handled by the service.\n"))
 	_, _ = w.Write([]byte("# TYPE homelab_access_http_requests_total counter\n"))
 	_, _ = w.Write([]byte("homelab_access_http_requests_total " + uintToString(s.requests.Load()) + "\n"))
+}
+
+func (s *Server) discordInteraction(w http.ResponseWriter, r *http.Request) {
+	defer r.Body.Close()
+
+	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	if err != nil {
+		s.logger.Warn("failed to read discord interaction body", "error", err)
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
+		return
+	}
+
+	if err := discord.VerifySignature(
+		s.cfg.DiscordPublicKey,
+		r.Header.Get("X-Signature-Ed25519"),
+		r.Header.Get("X-Signature-Timestamp"),
+		body,
+	); err != nil {
+		s.logger.Warn("invalid discord interaction signature", "error", err)
+		http.Error(w, "invalid request signature", http.StatusUnauthorized)
+		return
+	}
+
+	interaction, err := discord.ParseInteraction(body)
+	if err != nil {
+		s.logger.Warn("failed to parse discord interaction", "error", err)
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid interaction payload"})
+		return
+	}
+
+	switch interaction.Type {
+	case discord.InteractionTypePing:
+		writeJSON(w, http.StatusOK, discord.InteractionResponse{Type: discord.ResponseTypePong})
+	case discord.InteractionTypeApplicationCommand:
+		s.handleApplicationCommand(w, interaction)
+	default:
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unsupported interaction type"})
+	}
+}
+
+func (s *Server) handleApplicationCommand(w http.ResponseWriter, interaction discord.Interaction) {
+	switch discord.CommandPath(interaction) {
+	case "access request":
+		userID := discord.UserID(interaction)
+		if userID == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "interaction user is required"})
+			return
+		}
+
+		s.logger.Info("access request received", "discord_user_id", userID, "guild_id", interaction.GuildID, "channel_id", interaction.ChannelID)
+		writeJSON(w, http.StatusOK, discord.EphemeralMessage("Access request received. An admin will review it before any Authentik account or VPN configuration is created."))
+	default:
+		writeJSON(w, http.StatusOK, discord.EphemeralMessage("Unknown access command. Try `/access request`."))
+	}
 }
 
 func (s *Server) notImplemented(message string) http.HandlerFunc {
