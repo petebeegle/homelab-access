@@ -2,6 +2,8 @@ package server
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"io"
@@ -16,6 +18,7 @@ import (
 	"github.com/petebeegle/homelab-access/internal/authentik"
 	"github.com/petebeegle/homelab-access/internal/config"
 	"github.com/petebeegle/homelab-access/internal/discord"
+	"github.com/petebeegle/homelab-access/internal/wgeasy"
 )
 
 type Server struct {
@@ -23,6 +26,7 @@ type Server struct {
 	logger    *slog.Logger
 	store     access.Store
 	authentik *authentik.Client
+	wgeasy    *wgeasy.Client
 	startedAt time.Time
 	requests  atomic.Uint64
 }
@@ -37,11 +41,16 @@ func New(cfg config.Config, logger *slog.Logger) (http.Handler, error) {
 }
 
 func NewWithStore(cfg config.Config, logger *slog.Logger, store access.Store) http.Handler {
+	if cfg.DownloadTokenTTL == 0 {
+		cfg.DownloadTokenTTL = 15 * time.Minute
+	}
+
 	s := &Server{
 		cfg:       cfg,
 		logger:    logger,
 		store:     store,
 		authentik: authentik.New(cfg.AuthentikBaseURL, cfg.AuthentikToken),
+		wgeasy:    wgeasy.New(cfg.WGEasyBaseURL, cfg.WGEasyUsername, cfg.WGEasyPassword),
 		startedAt: time.Now().UTC(),
 	}
 
@@ -51,7 +60,7 @@ func NewWithStore(cfg config.Config, logger *slog.Logger, store access.Store) ht
 	mux.HandleFunc("GET /metrics", s.metrics)
 	mux.HandleFunc("POST /discord/interactions", s.discordInteraction)
 	mux.HandleFunc("GET /oauth/callback", s.discordOAuthCallback)
-	mux.HandleFunc("GET /download/{token}", s.notImplemented("one-time VPN downloads are not implemented in the foundation build"))
+	mux.HandleFunc("GET /download/{token}", s.downloadVPNConfiguration)
 	mux.HandleFunc("/", s.notFound)
 
 	return s.logRequests(mux)
@@ -284,7 +293,30 @@ func (s *Server) reviewAccessRequest(w http.ResponseWriter, interaction discord.
 			return
 		}
 		s.logger.Info("authentik user ensured", "request_id", requestID, "authentik_user_id", user.ID, "authentik_username", user.Username, "created", created)
-		request, err = s.store.Approve(requestID, reviewerID)
+
+		vpnClient, err := s.wgeasy.ProvisionClient(context.Background(), pendingRequest)
+		if err != nil {
+			s.logger.Error("failed to provision wireguard client", "error", err, "request_id", requestID)
+			writeJSON(w, http.StatusOK, discord.EphemeralMessage("Access request "+requestID+" is still pending because VPN provisioning failed."))
+			return
+		}
+
+		downloadToken, err := randomToken()
+		if err != nil {
+			s.logger.Error("failed to generate download token", "error", err, "request_id", requestID)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to generate download token"})
+			return
+		}
+
+		request, err = s.store.Approve(requestID, access.ApprovalInput{
+			ReviewerID:             reviewerID,
+			AuthentikUserID:        intToString(user.ID),
+			AuthentikUsername:      user.Username,
+			WireGuardClientID:      vpnClient.ID,
+			WireGuardConfiguration: vpnClient.Configuration,
+			DownloadToken:          downloadToken,
+			DownloadTokenExpiresAt: time.Now().UTC().Add(s.cfg.DownloadTokenTTL),
+		})
 	case access.StatusDenied:
 		request, err = s.store.Deny(requestID, reviewerID)
 	default:
@@ -299,10 +331,33 @@ func (s *Server) reviewAccessRequest(w http.ResponseWriter, interaction discord.
 
 	s.logger.Info("access request reviewed", "request_id", request.ID, "status", request.Status, "reviewer_id", reviewerID, "discord_user_id", request.DiscordUserID)
 	if status == access.StatusApproved {
-		writeJSON(w, http.StatusOK, discord.EphemeralMessage("Access request "+request.ID+" approved. Authentik user is ready; VPN provisioning is not wired yet."))
+		downloadURL := s.cfg.PublicBaseURL + "/download/" + url.PathEscape(request.DownloadToken)
+		writeJSON(w, http.StatusOK, discord.EphemeralMessage("Access request "+request.ID+" approved. Authentik user is ready and the VPN config can be downloaded once: "+downloadURL))
 		return
 	}
 	writeJSON(w, http.StatusOK, discord.EphemeralMessage("Access request "+request.ID+" denied."))
+}
+
+func (s *Server) downloadVPNConfiguration(w http.ResponseWriter, r *http.Request) {
+	token := r.PathValue("token")
+	request, err := s.store.ConsumeDownload(token)
+	if err != nil {
+		switch {
+		case errors.Is(err, access.ErrDownloadExpired):
+			writeJSON(w, http.StatusGone, map[string]string{"error": "download token expired"})
+		case errors.Is(err, access.ErrDownloadConsumed):
+			writeJSON(w, http.StatusGone, map[string]string{"error": "download token already used"})
+		default:
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "download token not found"})
+		}
+		return
+	}
+
+	filename := "homelab-" + safeFilename(request.DiscordUserID) + ".conf"
+	w.Header().Set("Content-Disposition", `attachment; filename="`+filename+`"`)
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte(request.WireGuardConfiguration))
 }
 
 func (s *Server) handleReviewError(w http.ResponseWriter, err error, requestID string) {
@@ -373,4 +428,39 @@ func uintToString(value uint64) string {
 		value /= 10
 	}
 	return string(buf[i:])
+}
+
+func intToString(value int) string {
+	if value == 0 {
+		return ""
+	}
+	return uintToString(uint64(value))
+}
+
+func randomToken() (string, error) {
+	var token [32]byte
+	if _, err := rand.Read(token[:]); err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(token[:]), nil
+}
+
+func safeFilename(value string) string {
+	var builder strings.Builder
+	for _, r := range value {
+		switch {
+		case r >= 'a' && r <= 'z':
+			builder.WriteRune(r)
+		case r >= 'A' && r <= 'Z':
+			builder.WriteRune(r)
+		case r >= '0' && r <= '9':
+			builder.WriteRune(r)
+		case r == '-' || r == '_':
+			builder.WriteRune(r)
+		}
+	}
+	if builder.Len() == 0 {
+		return "wireguard"
+	}
+	return builder.String()
 }

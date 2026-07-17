@@ -21,6 +21,7 @@ type Config struct {
 	AuthentikBaseURL    string
 	AuthentikToken      string
 	WGEasyBaseURL       string
+	WGEasyUsername      string
 	WGEasyPassword      string
 	StorePath           string
 	DownloadTokenTTL    time.Duration
@@ -41,6 +42,7 @@ func Load() (Config, error) {
 		AuthentikBaseURL:    strings.TrimRight(os.Getenv("AUTHENTIK_BASE_URL"), "/"),
 		AuthentikToken:      os.Getenv("AUTHENTIK_TOKEN"),
 		WGEasyBaseURL:       strings.TrimRight(os.Getenv("WGEASY_BASE_URL"), "/"),
+		WGEasyUsername:      getEnv("WGEASY_USERNAME", "admin"),
 		WGEasyPassword:      os.Getenv("WGEASY_PASSWORD"),
 		StorePath:           getEnv("ACCESS_STORE_PATH", getEnv("DATABASE_PATH", "/data/homelab-access.json")),
 	}

@@ -8,13 +8,13 @@ The foundation build exposes:
 - `GET /readyz`
 - `GET /metrics`
 - `POST /discord/interactions`
-- `GET /download/{token}` placeholder
+- `GET /download/{token}`
 
 The Discord endpoint validates Discord Ed25519 signatures, answers PING with
 PONG, acknowledges `/access request`, and lets configured admins approve or deny
 requests with ephemeral responses. Approval creates or reuses an Authentik user.
-Future builds will create wg-easy peers and deliver single-use WireGuard
-configs.
+Approval also creates or reuses a wg-easy peer and returns a single-use
+WireGuard config download link.
 
 ## Configuration
 
@@ -30,7 +30,8 @@ configs.
 | `AUTHENTIK_BASE_URL` | none | Authentik base URL |
 | `AUTHENTIK_TOKEN` | none | Authentik API token for user provisioning |
 | `WGEASY_BASE_URL` | none | wg-easy base URL |
-| `WGEASY_PASSWORD` | none | wg-easy administrative password for future provisioning |
+| `WGEASY_USERNAME` | `admin` | wg-easy administrative username |
+| `WGEASY_PASSWORD` | none | wg-easy administrative password for peer provisioning |
 | `ACCESS_STORE_PATH` | `/data/homelab-access.json` | Runtime access request store path |
 | `DATABASE_PATH` | none | Backward-compatible fallback for `ACCESS_STORE_PATH` |
 | `DOWNLOAD_TOKEN_TTL` | `15m` | Default one-time link TTL |

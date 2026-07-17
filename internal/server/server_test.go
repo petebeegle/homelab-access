@@ -306,13 +306,19 @@ func TestDiscordAccessApproveCommand(t *testing.T) {
 	}
 	authentikServer := fakeAuthentikServer(t)
 	defer authentikServer.Close()
+	wgEasyServer := fakeWGEasyServer(t)
+	defer wgEasyServer.Close()
 
 	handler := testHandler(t, config.Config{
 		HTTPAddr:            ":8080",
+		PublicBaseURL:       "https://onboard.example.com",
 		DiscordPublicKey:    hex.EncodeToString(publicKey),
 		DiscordAdminUserIDs: []string{"admin-1"},
 		AuthentikBaseURL:    authentikServer.URL,
 		AuthentikToken:      "token-1",
+		WGEasyBaseURL:       wgEasyServer.URL,
+		WGEasyUsername:      "admin",
+		WGEasyPassword:      "password-1234",
 	})
 
 	createBody := `{
@@ -361,6 +367,23 @@ func TestDiscordAccessApproveCommand(t *testing.T) {
 	if !strings.Contains(approveResponse.Body.String(), "approved") {
 		t.Fatalf("expected approval response, got: %s", approveResponse.Body.String())
 	}
+	if !strings.Contains(approveResponse.Body.String(), "https://onboard.example.com/download/") {
+		t.Fatalf("expected download link, got: %s", approveResponse.Body.String())
+	}
+	downloadURL := extractDownloadURL(t, approveResponse.Body.String())
+	downloadResponse := httptest.NewRecorder()
+	handler.ServeHTTP(downloadResponse, httptest.NewRequest(http.MethodGet, downloadURL, nil))
+	if downloadResponse.Code != http.StatusOK {
+		t.Fatalf("expected download status %d, got %d: %s", http.StatusOK, downloadResponse.Code, downloadResponse.Body.String())
+	}
+	if !strings.Contains(downloadResponse.Body.String(), "PrivateKey = test-private-key") {
+		t.Fatalf("expected wireguard config, got: %s", downloadResponse.Body.String())
+	}
+	secondDownloadResponse := httptest.NewRecorder()
+	handler.ServeHTTP(secondDownloadResponse, httptest.NewRequest(http.MethodGet, downloadURL, nil))
+	if secondDownloadResponse.Code != http.StatusGone {
+		t.Fatalf("expected consumed download status %d, got %d: %s", http.StatusGone, secondDownloadResponse.Code, secondDownloadResponse.Body.String())
+	}
 
 	duplicateResponse := httptest.NewRecorder()
 	handler.ServeHTTP(duplicateResponse, signedDiscordRequest(t, privateKey, approveBody))
@@ -379,13 +402,19 @@ func TestDiscordAccessApproveCommandRejectsUnauthorizedUser(t *testing.T) {
 	}
 	authentikServer := fakeAuthentikServer(t)
 	defer authentikServer.Close()
+	wgEasyServer := fakeWGEasyServer(t)
+	defer wgEasyServer.Close()
 
 	handler := testHandler(t, config.Config{
 		HTTPAddr:            ":8080",
+		PublicBaseURL:       "https://onboard.example.com",
 		DiscordPublicKey:    hex.EncodeToString(publicKey),
 		DiscordAdminUserIDs: []string{"admin-1"},
 		AuthentikBaseURL:    authentikServer.URL,
 		AuthentikToken:      "token-1",
+		WGEasyBaseURL:       wgEasyServer.URL,
+		WGEasyUsername:      "admin",
+		WGEasyPassword:      "password-1234",
 	})
 
 	createBody := `{
@@ -494,6 +523,41 @@ func fakeAuthentikServer(t *testing.T) *httptest.Server {
 	}))
 }
 
+func fakeWGEasyServer(t *testing.T) *httptest.Server {
+	t.Helper()
+
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/api/session":
+			var body map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatal(err)
+			}
+			if body["username"] != "admin" || body["password"] != "password-1234" || body["remember"] != true {
+				t.Fatalf("unexpected wg-easy login body: %#v", body)
+			}
+			http.SetCookie(w, &http.Cookie{Name: "wg-easy", Value: "session-1"})
+			_ = json.NewEncoder(w).Encode(map[string]string{"status": "success"})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/client":
+			_ = json.NewEncoder(w).Encode([]any{})
+		case r.Method == http.MethodPost && r.URL.Path == "/api/client":
+			var body map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatal(err)
+			}
+			if body["name"] != "discord-user-1" {
+				t.Fatalf("unexpected wg-easy client name: %#v", body)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "clientId": 7})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/client/7/configuration":
+			w.Header().Set("Content-Type", "application/octet-stream")
+			_, _ = w.Write([]byte("[Interface]\nPrivateKey = test-private-key\n"))
+		default:
+			t.Fatalf("unexpected wg-easy request: %s %s", r.Method, r.URL.String())
+		}
+	}))
+}
+
 func extractRequestID(t *testing.T, body string) string {
 	t.Helper()
 
@@ -509,6 +573,24 @@ func extractRequestID(t *testing.T, body string) string {
 			continue
 		}
 		break
+	}
+	return body[start:end]
+}
+
+func extractDownloadURL(t *testing.T, body string) string {
+	t.Helper()
+
+	start := strings.Index(body, "https://onboard.example.com/download/")
+	if start == -1 {
+		t.Fatalf("download url not found in body: %s", body)
+	}
+	end := start
+	for end < len(body) {
+		current := body[end]
+		if current == '\\' || current == '"' || current == '<' || current == ' ' {
+			break
+		}
+		end++
 	}
 	return body[start:end]
 }
