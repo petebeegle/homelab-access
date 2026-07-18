@@ -21,9 +21,12 @@ func TestProvisionClientCreatesAndDownloadsConfiguration(t *testing.T) {
 			if body["username"] != "admin" || body["password"] != "password-1234" || body["remember"] != true {
 				t.Fatalf("unexpected login body: %#v", body)
 			}
-			http.SetCookie(w, &http.Cookie{Name: "wg-easy", Value: "session-1"})
+			http.SetCookie(w, &http.Cookie{Name: "wg-easy", Value: "session-1", Secure: true})
 			_ = json.NewEncoder(w).Encode(map[string]string{"status": "success"})
 		case r.Method == http.MethodGet && r.URL.Path == "/api/client":
+			if r.Header.Get("Cookie") != "wg-easy=session-1" {
+				t.Fatalf("expected session cookie, got %q", r.Header.Get("Cookie"))
+			}
 			if r.URL.Query().Get("filter") != "discord-user-1" {
 				t.Fatalf("unexpected filter: %s", r.URL.RawQuery)
 			}
@@ -63,8 +66,12 @@ func TestProvisionClientReusesExistingClient(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodPost && r.URL.Path == "/api/session":
+			http.SetCookie(w, &http.Cookie{Name: "wg-easy", Value: "session-1", Secure: true})
 			_ = json.NewEncoder(w).Encode(map[string]string{"status": "success"})
 		case r.Method == http.MethodGet && r.URL.Path == "/api/client":
+			if r.Header.Get("Cookie") != "wg-easy=session-1" {
+				t.Fatalf("expected session cookie, got %q", r.Header.Get("Cookie"))
+			}
 			_ = json.NewEncoder(w).Encode([]any{
 				map[string]any{"id": 4, "name": "discord-user-1"},
 			})

@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/http/cookiejar"
 	"net/url"
 	"strings"
 	"time"
@@ -20,6 +19,7 @@ type Client struct {
 	baseURL    string
 	username   string
 	password   string
+	session    string
 	httpClient *http.Client
 }
 
@@ -29,14 +29,12 @@ type ProvisionedClient struct {
 }
 
 func New(baseURL, username, password string) *Client {
-	jar, _ := cookiejar.New(nil)
 	return &Client{
 		baseURL:  strings.TrimRight(baseURL, "/"),
 		username: username,
 		password: password,
 		httpClient: &http.Client{
 			Timeout: 10 * time.Second,
-			Jar:     jar,
 		},
 	}
 }
@@ -96,6 +94,15 @@ func (c *Client) login(ctx context.Context) error {
 	}
 	if err := c.do(request, http.StatusOK, &response); err != nil {
 		return err
+	}
+	for _, cookie := range request.Response.Cookies() {
+		if cookie.Name == "wg-easy" && cookie.Value != "" {
+			c.session = cookie.Name + "=" + cookie.Value
+			break
+		}
+	}
+	if c.session == "" {
+		return errors.New("wg-easy did not return a session cookie")
 	}
 	if response.Status != "success" {
 		return fmt.Errorf("wg-easy login returned status %q", response.Status)
@@ -197,6 +204,9 @@ func (c *Client) newRequest(ctx context.Context, method, endpoint string, body i
 		return nil, err
 	}
 	request.Header.Set("Accept", "application/json")
+	if c.session != "" {
+		request.Header.Set("Cookie", c.session)
+	}
 	if body != nil {
 		request.Header.Set("Content-Type", "application/json")
 	}
@@ -217,6 +227,7 @@ func (c *Client) do(request *http.Request, expectedStatus int, output any) error
 	if response.StatusCode != expectedStatus {
 		return fmt.Errorf("wg-easy returned status %d: %s", response.StatusCode, string(body))
 	}
+	request.Response = response
 	if output == nil || len(body) == 0 {
 		return nil
 	}
