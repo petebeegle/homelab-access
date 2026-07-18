@@ -545,7 +545,7 @@ func fakeWGEasyServer(t *testing.T) *httptest.Server {
 			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 				t.Fatal(err)
 			}
-			if body["name"] != "discord-user-1" {
+			if body["name"] != "discord-alice-user-1" {
 				t.Fatalf("unexpected wg-easy client name: %#v", body)
 			}
 			_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "clientId": 7})

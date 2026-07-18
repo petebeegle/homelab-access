@@ -51,7 +51,7 @@ func (c *Client) ProvisionClient(ctx context.Context, request access.Request) (P
 		return ProvisionedClient{}, err
 	}
 
-	name := "discord-" + request.DiscordUserID
+	name := clientName(request)
 	clientID, err := c.findClientID(ctx, name)
 	if err != nil {
 		return ProvisionedClient{}, err
@@ -72,6 +72,51 @@ func (c *Client) ProvisionClient(ctx context.Context, request access.Request) (P
 		ID:            clientID,
 		Configuration: configuration,
 	}, nil
+}
+
+func clientName(request access.Request) string {
+	name := sanitizeName(request.DiscordName)
+	if name == "" {
+		name = sanitizeName(request.DiscordUserID)
+	}
+
+	suffix := request.DiscordUserID
+	if len(suffix) > 6 {
+		suffix = suffix[len(suffix)-6:]
+	}
+	if suffix == "" {
+		return "discord-" + name
+	}
+	if name == "" || name == suffix {
+		return "discord-" + suffix
+	}
+	return "discord-" + name + "-" + suffix
+}
+
+func sanitizeName(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	var builder strings.Builder
+	lastDash := false
+	for _, r := range value {
+		switch {
+		case r >= 'a' && r <= 'z':
+			builder.WriteRune(r)
+			lastDash = false
+		case r >= '0' && r <= '9':
+			builder.WriteRune(r)
+			lastDash = false
+		case r == '-' || r == '_' || r == '.' || r == ' ':
+			if builder.Len() > 0 && !lastDash {
+				builder.WriteByte('-')
+				lastDash = true
+			}
+		}
+	}
+	result := strings.Trim(builder.String(), "-")
+	if len(result) > 48 {
+		result = strings.Trim(result[:48], "-")
+	}
+	return result
 }
 
 func (c *Client) login(ctx context.Context) error {

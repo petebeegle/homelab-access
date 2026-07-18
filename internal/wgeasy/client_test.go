@@ -27,7 +27,7 @@ func TestProvisionClientCreatesAndDownloadsConfiguration(t *testing.T) {
 			if r.Header.Get("Cookie") != "wg-easy=session-1" {
 				t.Fatalf("expected session cookie, got %q", r.Header.Get("Cookie"))
 			}
-			if r.URL.Query().Get("filter") != "discord-user-1" {
+			if r.URL.Query().Get("filter") != "discord-alice-example-user-1" {
 				t.Fatalf("unexpected filter: %s", r.URL.RawQuery)
 			}
 			_ = json.NewEncoder(w).Encode([]any{})
@@ -36,7 +36,7 @@ func TestProvisionClientCreatesAndDownloadsConfiguration(t *testing.T) {
 			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 				t.Fatal(err)
 			}
-			if body["name"] != "discord-user-1" {
+			if body["name"] != "discord-alice-example-user-1" {
 				t.Fatalf("unexpected client body: %#v", body)
 			}
 			_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "clientId": 9})
@@ -49,7 +49,10 @@ func TestProvisionClientCreatesAndDownloadsConfiguration(t *testing.T) {
 	defer server.Close()
 
 	client := New(server.URL, "admin", "password-1234")
-	result, err := client.ProvisionClient(context.Background(), access.Request{DiscordUserID: "user-1"})
+	result, err := client.ProvisionClient(context.Background(), access.Request{
+		DiscordUserID: "user-1",
+		DiscordName:   "Alice Example!",
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -73,7 +76,7 @@ func TestProvisionClientReusesExistingClient(t *testing.T) {
 				t.Fatalf("expected session cookie, got %q", r.Header.Get("Cookie"))
 			}
 			_ = json.NewEncoder(w).Encode([]any{
-				map[string]any{"id": 4, "name": "discord-user-1"},
+				map[string]any{"id": 4, "name": "discord-alice-user-1"},
 			})
 		case r.Method == http.MethodPost && r.URL.Path == "/api/client":
 			created = true
@@ -87,7 +90,10 @@ func TestProvisionClientReusesExistingClient(t *testing.T) {
 	defer server.Close()
 
 	client := New(server.URL, "admin", "password-1234")
-	result, err := client.ProvisionClient(context.Background(), access.Request{DiscordUserID: "user-1"})
+	result, err := client.ProvisionClient(context.Background(), access.Request{
+		DiscordUserID: "user-1",
+		DiscordName:   "Alice",
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -96,5 +102,15 @@ func TestProvisionClientReusesExistingClient(t *testing.T) {
 	}
 	if result.ID != "4" {
 		t.Fatalf("expected client id 4, got %q", result.ID)
+	}
+}
+
+func TestClientNameSanitizesDiscordName(t *testing.T) {
+	name := clientName(access.Request{
+		DiscordUserID: "252951660027052033",
+		DiscordName:   "Pete Beegle / Ops",
+	})
+	if name != "discord-pete-beegle-ops-052033" {
+		t.Fatalf("unexpected client name: %q", name)
 	}
 }
