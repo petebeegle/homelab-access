@@ -427,6 +427,76 @@ func TestDiscordAccessApproveCommand(t *testing.T) {
 	}
 }
 
+func TestDiscordAccessApproveCommandClaimsBeforeProvisioning(t *testing.T) {
+	publicKey, privateKey, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	provisioningGate := make(chan struct{})
+	authentikServer := fakeAuthentikServerWithGate(t, provisioningGate)
+	defer authentikServer.Close()
+	wgEasyServer := fakeWGEasyServer(t)
+	defer wgEasyServer.Close()
+	discordServer, discordMessages := fakeDiscordWebhookServer(t)
+	defer discordServer.Close()
+
+	handler := testHandler(t, config.Config{
+		HTTPAddr:            ":8080",
+		PublicBaseURL:       "https://onboard.example.com",
+		DiscordAppID:        "app-1",
+		DiscordPublicKey:    hex.EncodeToString(publicKey),
+		DiscordAPIBaseURL:   discordServer.URL,
+		DiscordAdminUserIDs: []string{"admin-1"},
+		AuthentikBaseURL:    authentikServer.URL,
+		AuthentikToken:      "token-1",
+		WGEasyBaseURL:       wgEasyServer.URL,
+		WGEasyUsername:      "admin",
+		WGEasyPassword:      "password-1234",
+	})
+
+	createBody := `{
+		"type": 2,
+		"member": {
+			"user": {"id": "user-1", "username": "alice"}
+		},
+		"data": {
+			"name": "access",
+			"options": [
+				{"name": "request", "type": 1}
+			]
+		}
+	}`
+	createResponse := httptest.NewRecorder()
+	handler.ServeHTTP(createResponse, signedDiscordRequest(t, privateKey, createBody))
+	if createResponse.Code != http.StatusOK {
+		t.Fatalf("expected create status %d, got %d: %s", http.StatusOK, createResponse.Code, createResponse.Body.String())
+	}
+
+	requestID := extractRequestID(t, createResponse.Body.String())
+	approveBody := accessReviewBody("approve", requestID, "admin-1")
+
+	first := httptest.NewRecorder()
+	handler.ServeHTTP(first, signedDiscordRequest(t, privateKey, approveBody))
+	if !strings.Contains(first.Body.String(), `"type":5`) {
+		t.Fatalf("expected first approval to be deferred, got: %s", first.Body.String())
+	}
+
+	second := httptest.NewRecorder()
+	handler.ServeHTTP(second, signedDiscordRequest(t, privateKey, approveBody))
+	if strings.Contains(second.Body.String(), `"type":5`) {
+		t.Fatalf("expected second approval not to start provisioning, got: %s", second.Body.String())
+	}
+	if !strings.Contains(second.Body.String(), "already being reviewed") {
+		t.Fatalf("expected in-progress response, got: %s", second.Body.String())
+	}
+
+	close(provisioningGate)
+	finalMessage := waitForDiscordMessage(t, discordMessages)
+	if !strings.Contains(finalMessage, "approved") {
+		t.Fatalf("expected first approval to complete, got: %s", finalMessage)
+	}
+}
+
 func TestDiscordAccessApproveCommandRejectsUnauthorizedUser(t *testing.T) {
 	publicKey, privateKey, err := ed25519.GenerateKey(nil)
 	if err != nil {
