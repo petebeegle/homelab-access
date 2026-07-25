@@ -8,7 +8,8 @@ The foundation build exposes:
 - `GET /readyz`
 - `GET /metrics`
 - `POST /discord/interactions`
-- `GET /download/{token}`
+- `GET /download/{token}` (non-consuming confirmation page)
+- `POST /download/{token}` (single-use configuration download)
 
 The Discord endpoint validates Discord Ed25519 signatures, answers PING with
 PONG, acknowledges `/access request`, and lets configured admins approve or deny

@@ -58,6 +58,7 @@ type Store interface {
 	GetPending(id string) (Request, error)
 	Approve(id string, input ApprovalInput) (Request, error)
 	Deny(id, reviewerID string) (Request, error)
+	GetDownload(token string) (Request, error)
 	ConsumeDownload(token string) (Request, error)
 }
 
@@ -209,6 +210,17 @@ func (s *FileStore) Deny(id, reviewerID string) (Request, error) {
 	return s.review(id, reviewerID, StatusDenied)
 }
 
+func (s *FileStore) GetDownload(token string) (Request, error) {
+	if token == "" {
+		return Request{}, ErrDownloadNotFound
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return s.getDownloadLocked(token, false)
+}
+
 func (s *FileStore) ConsumeDownload(token string) (Request, error) {
 	if token == "" {
 		return Request{}, ErrDownloadNotFound
@@ -217,6 +229,10 @@ func (s *FileStore) ConsumeDownload(token string) (Request, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	return s.getDownloadLocked(token, true)
+}
+
+func (s *FileStore) getDownloadLocked(token string, consume bool) (Request, error) {
 	for i := range s.data.Requests {
 		if s.data.Requests[i].DownloadToken != token {
 			continue
@@ -230,6 +246,9 @@ func (s *FileStore) ConsumeDownload(token string) (Request, error) {
 		now := s.now()
 		if !s.data.Requests[i].DownloadTokenExpiresAt.IsZero() && now.After(s.data.Requests[i].DownloadTokenExpiresAt) {
 			return Request{}, ErrDownloadExpired
+		}
+		if !consume {
+			return s.data.Requests[i], nil
 		}
 
 		previous := s.data.Requests[i]

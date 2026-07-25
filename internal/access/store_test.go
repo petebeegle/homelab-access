@@ -169,6 +169,17 @@ func TestFileStoreConsumesDownloadOnce(t *testing.T) {
 	}
 
 	store.now = func() time.Time { return now.Add(time.Minute) }
+	preview, err := store.GetDownload(approved.DownloadToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if preview.WireGuardConfiguration == "" {
+		t.Fatal("expected wireguard configuration in preview lookup")
+	}
+	if _, err := store.GetDownload(approved.DownloadToken); err != nil {
+		t.Fatalf("expected repeated preview lookup to succeed, got %v", err)
+	}
+
 	download, err := store.ConsumeDownload(approved.DownloadToken)
 	if err != nil {
 		t.Fatal(err)
