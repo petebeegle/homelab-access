@@ -276,10 +276,6 @@ func (s *Server) reviewAccessRequest(w http.ResponseWriter, interaction discord.
 		return
 	}
 
-	var (
-		request access.Request
-		err     error
-	)
 	switch status {
 	case access.StatusApproved:
 		pendingRequest, err := s.store.GetPending(requestID)
@@ -287,56 +283,108 @@ func (s *Server) reviewAccessRequest(w http.ResponseWriter, interaction discord.
 			s.handleReviewError(w, err, requestID)
 			return
 		}
-		user, created, err := s.authentik.EnsureUser(context.Background(), pendingRequest)
-		if err != nil {
-			s.logger.Error("failed to provision authentik user", "error", err, "request_id", requestID)
-			writeJSON(w, http.StatusOK, discord.EphemeralMessage("Access request "+requestID+" is still pending because Authentik provisioning failed."))
-			return
-		}
-		s.logger.Info("authentik user ensured", "request_id", requestID, "authentik_user_id", user.ID, "authentik_username", user.Username, "created", created)
-
-		vpnClient, err := s.wgeasy.ProvisionClient(context.Background(), pendingRequest)
-		if err != nil {
-			s.logger.Error("failed to provision wireguard client", "error", err, "request_id", requestID)
-			writeJSON(w, http.StatusOK, discord.EphemeralMessage("Access request "+requestID+" is still pending because VPN provisioning failed."))
+		if interaction.Token == "" || s.cfg.DiscordAppID == "" {
+			s.logger.Error("discord interaction cannot be deferred", "request_id", requestID, "has_token", interaction.Token != "", "has_app_id", s.cfg.DiscordAppID != "")
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "discord interaction metadata is incomplete"})
 			return
 		}
 
-		downloadToken, err := randomToken()
-		if err != nil {
-			s.logger.Error("failed to generate download token", "error", err, "request_id", requestID)
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to generate download token"})
-			return
-		}
-
-		request, err = s.store.Approve(requestID, access.ApprovalInput{
-			ReviewerID:             reviewerID,
-			AuthentikUserID:        intToString(user.ID),
-			AuthentikUsername:      user.Username,
-			WireGuardClientID:      vpnClient.ID,
-			WireGuardConfiguration: vpnClient.Configuration,
-			DownloadToken:          downloadToken,
-			DownloadTokenExpiresAt: time.Now().UTC().Add(s.cfg.DownloadTokenTTL),
-		})
+		writeJSON(w, http.StatusOK, discord.DeferredEphemeralMessage())
+		go s.approveAccessRequest(interaction.Token, pendingRequest, reviewerID)
+		return
 	case access.StatusDenied:
-		request, err = s.store.Deny(requestID, reviewerID)
+		request, err := s.store.Deny(requestID, reviewerID)
+		if err != nil {
+			s.handleReviewError(w, err, requestID)
+			return
+		}
+		s.logger.Info("access request reviewed", "request_id", request.ID, "status", request.Status, "reviewer_id", reviewerID, "discord_user_id", request.DiscordUserID)
+		writeJSON(w, http.StatusOK, discord.EphemeralMessage("Access request "+request.ID+" denied."))
 	default:
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "unsupported review status"})
+	}
+}
+
+func (s *Server) approveAccessRequest(interactionToken string, pendingRequest access.Request, reviewerID string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	requestID := pendingRequest.ID
+	user, created, err := s.authentik.EnsureUser(ctx, pendingRequest)
+	if err != nil {
+		s.logger.Error("failed to provision authentik user", "error", err, "request_id", requestID)
+		s.completeDeferredResponse(interactionToken, "Access request "+requestID+" is still pending because Authentik provisioning failed.")
+		return
+	}
+	s.logger.Info("authentik user ensured", "request_id", requestID, "authentik_user_id", user.ID, "authentik_username", user.Username, "created", created)
+
+	vpnClient, err := s.wgeasy.ProvisionClient(ctx, pendingRequest)
+	if err != nil {
+		s.logger.Error("failed to provision wireguard client", "error", err, "request_id", requestID)
+		s.completeDeferredResponse(interactionToken, "Access request "+requestID+" is still pending because VPN provisioning failed.")
 		return
 	}
 
+	downloadToken, err := randomToken()
 	if err != nil {
-		s.handleReviewError(w, err, requestID)
+		s.logger.Error("failed to generate download token", "error", err, "request_id", requestID)
+		s.completeDeferredResponse(interactionToken, "Access request "+requestID+" is still pending because download link generation failed.")
+		return
+	}
+
+	request, err := s.store.Approve(requestID, access.ApprovalInput{
+		ReviewerID:             reviewerID,
+		AuthentikUserID:        intToString(user.ID),
+		AuthentikUsername:      user.Username,
+		WireGuardClientID:      vpnClient.ID,
+		WireGuardConfiguration: vpnClient.Configuration,
+		DownloadToken:          downloadToken,
+		DownloadTokenExpiresAt: time.Now().UTC().Add(s.cfg.DownloadTokenTTL),
+	})
+	if err != nil {
+		s.logger.Error("failed to approve access request", "error", err, "request_id", requestID)
+		s.completeDeferredResponse(interactionToken, reviewErrorMessage(err, requestID))
 		return
 	}
 
 	s.logger.Info("access request reviewed", "request_id", request.ID, "status", request.Status, "reviewer_id", reviewerID, "discord_user_id", request.DiscordUserID)
-	if status == access.StatusApproved {
-		downloadURL := s.cfg.PublicBaseURL + "/download/" + url.PathEscape(request.DownloadToken)
-		writeJSON(w, http.StatusOK, discord.EphemeralMessage("Access request "+request.ID+" approved. Authentik user is ready. Open this link and click Download to retrieve the VPN config once: "+downloadURL))
+	downloadURL := s.cfg.PublicBaseURL + "/download/" + url.PathEscape(request.DownloadToken)
+	s.completeDeferredResponse(interactionToken, "Access request "+request.ID+" approved. Authentik user is ready. Open this link and click Download to retrieve the VPN config once: "+downloadURL)
+}
+
+func (s *Server) completeDeferredResponse(interactionToken, content string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	endpoint := s.cfg.DiscordAPIBaseURL + "/webhooks/" + url.PathEscape(s.cfg.DiscordAppID) + "/" + url.PathEscape(interactionToken) + "/messages/@original"
+	body, err := json.Marshal(map[string]string{"content": content})
+	if err != nil {
+		s.logger.Error("failed to encode deferred discord response", "error", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, discord.EphemeralMessage("Access request "+request.ID+" denied."))
+
+	request, err := http.NewRequestWithContext(ctx, http.MethodPatch, endpoint, strings.NewReader(string(body)))
+	if err != nil {
+		s.logger.Error("failed to create deferred discord response", "error", err)
+		return
+	}
+	request.Header.Set("Content-Type", "application/json")
+
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		s.logger.Error("failed to send deferred discord response", "error", err)
+		return
+	}
+	defer response.Body.Close()
+
+	responseBody, readErr := io.ReadAll(io.LimitReader(response.Body, 1<<20))
+	if readErr != nil {
+		s.logger.Error("failed to read deferred discord response", "error", readErr)
+		return
+	}
+	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
+		s.logger.Error("discord rejected deferred response", "status", response.StatusCode, "body", string(responseBody))
+	}
 }
 
 func (s *Server) confirmVPNConfigurationDownload(w http.ResponseWriter, r *http.Request) {
@@ -405,14 +453,22 @@ func writeDownloadError(w http.ResponseWriter, err error) {
 }
 
 func (s *Server) handleReviewError(w http.ResponseWriter, err error, requestID string) {
+	if errors.Is(err, access.ErrRequestNotFound) || errors.Is(err, access.ErrRequestNotPending) {
+		writeJSON(w, http.StatusOK, discord.EphemeralMessage(reviewErrorMessage(err, requestID)))
+		return
+	}
+	s.logger.Error("failed to review access request", "error", err, "request_id", requestID)
+	writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to review access request"})
+}
+
+func reviewErrorMessage(err error, requestID string) string {
 	switch {
 	case errors.Is(err, access.ErrRequestNotFound):
-		writeJSON(w, http.StatusOK, discord.EphemeralMessage("No access request found for "+requestID+"."))
+		return "No access request found for " + requestID + "."
 	case errors.Is(err, access.ErrRequestNotPending):
-		writeJSON(w, http.StatusOK, discord.EphemeralMessage("Access request "+requestID+" has already been reviewed."))
+		return "Access request " + requestID + " has already been reviewed."
 	default:
-		s.logger.Error("failed to review access request", "error", err, "request_id", requestID)
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to review access request"})
+		return "Access request " + requestID + " could not be reviewed."
 	}
 }
 
