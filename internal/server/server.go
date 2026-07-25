@@ -18,6 +18,7 @@ import (
 	"github.com/petebeegle/homelab-access/internal/authentik"
 	"github.com/petebeegle/homelab-access/internal/config"
 	"github.com/petebeegle/homelab-access/internal/discord"
+	"github.com/petebeegle/homelab-access/internal/server/commands"
 	"github.com/petebeegle/homelab-access/internal/wgeasy"
 )
 
@@ -27,6 +28,7 @@ type Server struct {
 	store     access.Store
 	authentik *authentik.Client
 	wgeasy    *wgeasy.Client
+	commands  *commands.Dispatcher
 	startedAt time.Time
 	requests  atomic.Uint64
 }
@@ -51,8 +53,10 @@ func NewWithStore(cfg config.Config, logger *slog.Logger, store access.Store) ht
 		store:     store,
 		authentik: authentik.New(cfg.AuthentikBaseURL, cfg.AuthentikToken),
 		wgeasy:    wgeasy.New(cfg.WGEasyBaseURL, cfg.WGEasyUsername, cfg.WGEasyPassword),
+		commands:  commands.NewDispatcher(),
 		startedAt: time.Now().UTC(),
 	}
+	s.registerCommands()
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.healthz)
@@ -223,42 +227,60 @@ func (s *Server) discordInteraction(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleApplicationCommand(w http.ResponseWriter, interaction discord.Interaction) {
-	switch discord.CommandPath(interaction) {
-	case "access request":
-		userID := discord.UserID(interaction)
-		if userID == "" {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "interaction user is required"})
-			return
-		}
-
-		request, created, err := s.store.CreateOrGetPending(access.RequestInput{
-			DiscordUserID: userID,
-			DiscordName:   discord.DisplayName(interaction),
-			GuildID:       interaction.GuildID,
-			ChannelID:     interaction.ChannelID,
-		})
-		if err != nil {
-			s.logger.Error("failed to create access request", "error", err)
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to create access request"})
-			return
-		}
-
-		s.logger.Info("access request received", "request_id", request.ID, "created", created, "discord_user_id", userID, "guild_id", interaction.GuildID, "channel_id", interaction.ChannelID)
-		if created {
-			writeJSON(w, http.StatusOK, discord.EphemeralMessage("Access request "+request.ID+" received. An admin will review it before any Authentik account or VPN configuration is created."))
-			return
-		}
-		writeJSON(w, http.StatusOK, discord.EphemeralMessage("You already have pending access request "+request.ID+". An admin will review it before any Authentik account or VPN configuration is created."))
-	case "access approve":
-		s.reviewAccessRequest(w, interaction, access.StatusApproved)
-	case "access deny":
-		s.reviewAccessRequest(w, interaction, access.StatusDenied)
-	default:
+	if !s.commands.Dispatch(w, interaction) {
 		writeJSON(w, http.StatusOK, discord.EphemeralMessage("Unknown access command. Try `/access request`."))
 	}
 }
 
-func (s *Server) reviewAccessRequest(w http.ResponseWriter, interaction discord.Interaction, status string) {
+func (s *Server) registerCommands() {
+	registrations := map[string]commands.HandlerFunc{
+		"access request": s.requestAccess,
+		"access approve": func(w http.ResponseWriter, interaction discord.Interaction) {
+			s.reviewAccessRequest(w, interaction, access.StatusApproved)
+		},
+		"access deny": func(w http.ResponseWriter, interaction discord.Interaction) {
+			s.reviewAccessRequest(w, interaction, access.StatusDenied)
+		},
+	}
+	for path, handler := range registrations {
+		if err := s.commands.Register(path, handler); err != nil {
+			panic("register command " + path + ": " + err.Error())
+		}
+	}
+}
+
+func (s *Server) requestAccess(w http.ResponseWriter, interaction discord.Interaction) {
+	userID := discord.UserID(interaction)
+	if userID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "interaction user is required"})
+		return
+	}
+
+	request, created, err := s.store.CreateOrGetPending(access.RequestInput{
+		DiscordUserID: userID,
+		DiscordName:   discord.DisplayName(interaction),
+		GuildID:       interaction.GuildID,
+		ChannelID:     interaction.ChannelID,
+	})
+	if errors.Is(err, access.ErrActiveGrantExists) {
+		writeJSON(w, http.StatusOK, discord.EphemeralMessage("You already have active homelab access."))
+		return
+	}
+	if err != nil {
+		s.logger.Error("failed to create access request", "error", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to create access request"})
+		return
+	}
+
+	s.logger.Info("access request received", "request_id", request.ID, "created", created, "discord_user_id", userID, "guild_id", interaction.GuildID, "channel_id", interaction.ChannelID)
+	if created {
+		writeJSON(w, http.StatusOK, discord.EphemeralMessage("Access request "+request.ID+" received. An admin will review it before any Authentik account or VPN configuration is created."))
+		return
+	}
+	writeJSON(w, http.StatusOK, discord.EphemeralMessage("You already have pending access request "+request.ID+". An admin will review it before any Authentik account or VPN configuration is created."))
+}
+
+func (s *Server) reviewAccessRequest(w http.ResponseWriter, interaction discord.Interaction, status access.RequestStatus) {
 	reviewerID := discord.UserID(interaction)
 	if reviewerID == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "interaction user is required"})
@@ -278,19 +300,19 @@ func (s *Server) reviewAccessRequest(w http.ResponseWriter, interaction discord.
 
 	switch status {
 	case access.StatusApproved:
-		pendingRequest, err := s.store.GetPending(requestID)
-		if err != nil {
-			s.handleReviewError(w, err, requestID)
-			return
-		}
 		if interaction.Token == "" || s.cfg.DiscordAppID == "" {
 			s.logger.Error("discord interaction cannot be deferred", "request_id", requestID, "has_token", interaction.Token != "", "has_app_id", s.cfg.DiscordAppID != "")
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "discord interaction metadata is incomplete"})
 			return
 		}
+		claim, err := s.store.ClaimApproval(requestID, reviewerID)
+		if err != nil {
+			s.handleReviewError(w, err, requestID)
+			return
+		}
 
 		writeJSON(w, http.StatusOK, discord.DeferredEphemeralMessage())
-		go s.approveAccessRequest(interaction.Token, pendingRequest, reviewerID)
+		go s.approveAccessRequest(interaction.Token, claim)
 		return
 	case access.StatusDenied:
 		request, err := s.store.Deny(requestID, reviewerID)
@@ -305,14 +327,22 @@ func (s *Server) reviewAccessRequest(w http.ResponseWriter, interaction discord.
 	}
 }
 
-func (s *Server) approveAccessRequest(interactionToken string, pendingRequest access.Request, reviewerID string) {
+func (s *Server) approveAccessRequest(interactionToken string, claim access.ApprovalClaim) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 
+	pendingRequest, err := s.store.BeginApprovalProvisioning(claim)
+	if err != nil {
+		s.logger.Error("failed to begin access provisioning", "error", err, "request_id", claim.Request.ID)
+		s.releaseApprovalClaim(claim)
+		s.completeDeferredResponse(interactionToken, reviewErrorMessage(err, claim.Request.ID))
+		return
+	}
 	requestID := pendingRequest.ID
 	user, created, err := s.authentik.EnsureUser(ctx, pendingRequest)
 	if err != nil {
 		s.logger.Error("failed to provision authentik user", "error", err, "request_id", requestID)
+		s.releaseApprovalClaim(claim)
 		s.completeDeferredResponse(interactionToken, "Access request "+requestID+" is still pending because Authentik provisioning failed.")
 		return
 	}
@@ -321,6 +351,7 @@ func (s *Server) approveAccessRequest(interactionToken string, pendingRequest ac
 	vpnClient, err := s.wgeasy.ProvisionClient(ctx, pendingRequest)
 	if err != nil {
 		s.logger.Error("failed to provision wireguard client", "error", err, "request_id", requestID)
+		s.releaseApprovalClaim(claim)
 		s.completeDeferredResponse(interactionToken, "Access request "+requestID+" is still pending because VPN provisioning failed.")
 		return
 	}
@@ -328,14 +359,16 @@ func (s *Server) approveAccessRequest(interactionToken string, pendingRequest ac
 	downloadToken, err := randomToken()
 	if err != nil {
 		s.logger.Error("failed to generate download token", "error", err, "request_id", requestID)
-		s.completeDeferredResponse(interactionToken, "Access request "+requestID+" is still pending because download link generation failed.")
+		s.failApproval(claim)
+		s.completeDeferredResponse(interactionToken, "Access request "+requestID+" requires admin recovery because download link generation failed after provisioning.")
 		return
 	}
 
-	request, err := s.store.Approve(requestID, access.ApprovalInput{
-		ReviewerID:             reviewerID,
+	request, err := s.store.FinalizeApproval(claim, access.ApprovalInput{
+		ReviewerID:             claim.ReviewerID,
 		AuthentikUserID:        intToString(user.ID),
 		AuthentikUsername:      user.Username,
+		IdentityBrokerOwned:    created,
 		WireGuardClientID:      vpnClient.ID,
 		WireGuardConfiguration: vpnClient.Configuration,
 		DownloadToken:          downloadToken,
@@ -343,13 +376,26 @@ func (s *Server) approveAccessRequest(interactionToken string, pendingRequest ac
 	})
 	if err != nil {
 		s.logger.Error("failed to approve access request", "error", err, "request_id", requestID)
+		s.failApproval(claim)
 		s.completeDeferredResponse(interactionToken, reviewErrorMessage(err, requestID))
 		return
 	}
 
-	s.logger.Info("access request reviewed", "request_id", request.ID, "status", request.Status, "reviewer_id", reviewerID, "discord_user_id", request.DiscordUserID)
+	s.logger.Info("access request reviewed", "request_id", request.ID, "status", request.Status, "reviewer_id", claim.ReviewerID, "discord_user_id", request.DiscordUserID)
 	downloadURL := s.cfg.PublicBaseURL + "/download/" + url.PathEscape(request.DownloadToken)
 	s.completeDeferredResponse(interactionToken, "Access request "+request.ID+" approved. Authentik user is ready. Open this link and click Download to retrieve the VPN config once: "+downloadURL)
+}
+
+func (s *Server) releaseApprovalClaim(claim access.ApprovalClaim) {
+	if err := s.store.ReleaseApprovalClaim(claim.Request.ID, claim.ID); err != nil {
+		s.logger.Error("failed to release approval claim", "error", err, "request_id", claim.Request.ID, "claim_id", claim.ID)
+	}
+}
+
+func (s *Server) failApproval(claim access.ApprovalClaim) {
+	if _, err := s.store.FailApproval(claim); err != nil {
+		s.logger.Error("failed to mark approval failed", "error", err, "request_id", claim.Request.ID, "claim_id", claim.ID)
+	}
 }
 
 func (s *Server) completeDeferredResponse(interactionToken, content string) {
@@ -453,7 +499,9 @@ func writeDownloadError(w http.ResponseWriter, err error) {
 }
 
 func (s *Server) handleReviewError(w http.ResponseWriter, err error, requestID string) {
-	if errors.Is(err, access.ErrRequestNotFound) || errors.Is(err, access.ErrRequestNotPending) {
+	if errors.Is(err, access.ErrRequestNotFound) ||
+		errors.Is(err, access.ErrRequestNotPending) ||
+		errors.Is(err, access.ErrActiveGrantExists) {
 		writeJSON(w, http.StatusOK, discord.EphemeralMessage(reviewErrorMessage(err, requestID)))
 		return
 	}
@@ -465,6 +513,10 @@ func reviewErrorMessage(err error, requestID string) string {
 	switch {
 	case errors.Is(err, access.ErrRequestNotFound):
 		return "No access request found for " + requestID + "."
+	case errors.Is(err, access.ErrApprovalInProgress):
+		return "Access request " + requestID + " is already being reviewed."
+	case errors.Is(err, access.ErrActiveGrantExists):
+		return "The requester already has active homelab access."
 	case errors.Is(err, access.ErrRequestNotPending):
 		return "Access request " + requestID + " has already been reviewed."
 	default:
