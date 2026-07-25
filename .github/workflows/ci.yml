@@ -8,7 +8,10 @@ on:
 
 permissions:
   contents: read
-  packages: write
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: petebeegle/homelab-access
 
 jobs:
   test:
@@ -19,21 +22,71 @@ jobs:
         with:
           go-version-file: go.mod
       - run: go test ./...
+      - name: Validate GitHub Actions workflows
+        run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.7
 
   image:
     runs-on: ubuntu-latest
     needs: test
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
     steps:
       - uses: actions/checkout@v5
       - uses: docker/setup-buildx-action@v3
+
+      - name: Resolve image provenance
+        id: provenance
+        run: echo "created=$(git show -s --format=%cI "$GITHUB_SHA")" >> "$GITHUB_OUTPUT"
+
+      - name: Generate image metadata
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=sha,format=long
+            type=raw,value=main,enable=${{ github.ref == 'refs/heads/main' }}
+            type=ref,event=tag
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.created=${{ steps.provenance.outputs.created }}
+
       - uses: docker/login-action@v4
         if: github.event_name != 'pull_request'
         with:
-          registry: ghcr.io
+          registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - uses: docker/build-push-action@v6
+
+      - name: Build and optionally publish image
+        id: build
+        uses: docker/build-push-action@v6
         with:
           context: .
           push: ${{ github.event_name != 'pull_request' }}
-          tags: ghcr.io/petebeegle/homelab-access:${{ github.ref_type == 'tag' && github.ref_name || 'main' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            OCI_CREATED=${{ steps.provenance.outputs.created }}
+            OCI_REVISION=${{ github.sha }}
+            OCI_SOURCE=${{ github.server_url }}/${{ github.repository }}
+
+      - name: Report published image
+        if: github.event_name != 'pull_request'
+        env:
+          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+          IMAGE_TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          {
+            echo "### Published container image"
+            echo
+            echo "- Digest: \`${IMAGE_DIGEST}\`"
+            echo "- Tags:"
+            while IFS= read -r tag; do
+              echo "  - \`${tag}\`"
+            done <<< "${IMAGE_TAGS}"
+          } >> "$GITHUB_STEP_SUMMARY"
