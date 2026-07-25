@@ -37,3 +37,24 @@ ephemeral response is updated after provisioning completes.
 | `ACCESS_STORE_PATH` | `/data/homelab-access.json` | Runtime access request store path |
 | `DATABASE_PATH` | none | Backward-compatible fallback for `ACCESS_STORE_PATH` |
 | `DOWNLOAD_TOKEN_TTL` | `15m` | Default one-time link TTL |
+
+## Container images
+
+CI builds the container on every pull request without publishing it. Push events
+publish `ghcr.io/petebeegle/homelab-access` with these tags:
+
+| Event | Published tags |
+| --- | --- |
+| Commit merged to `main` | `sha-<full-40-character-commit-sha>`, `main` |
+| Git tag matching `v*` | `sha-<full-40-character-commit-sha>`, the unchanged Git tag |
+
+The `sha-*` tag is the immutable deployment identifier. `main` is only a
+discovery alias and can move. Version tags retain their exact Git tag spelling.
+Published images include `org.opencontainers.image.source`,
+`org.opencontainers.image.revision`, and `org.opencontainers.image.created`
+labels. The CI image job exposes the registry digest as its `digest` output and
+records the digest and published tags in the workflow summary.
+
+GitOps consumers should resolve the `sha-*` image to its registry digest and pin
+the deployment to that digest. Updating the homelab manifests and automating
+that promotion are part of the separate S02B release-hygiene slice.
