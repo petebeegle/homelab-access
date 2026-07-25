@@ -371,8 +371,26 @@ func TestDiscordAccessApproveCommand(t *testing.T) {
 		t.Fatalf("expected download link, got: %s", approveResponse.Body.String())
 	}
 	downloadURL := extractDownloadURL(t, approveResponse.Body.String())
+	previewResponse := httptest.NewRecorder()
+	handler.ServeHTTP(previewResponse, httptest.NewRequest(http.MethodGet, downloadURL, nil))
+	if previewResponse.Code != http.StatusOK {
+		t.Fatalf("expected preview status %d, got %d: %s", http.StatusOK, previewResponse.Code, previewResponse.Body.String())
+	}
+	if !strings.Contains(previewResponse.Body.String(), `<form method="post">`) {
+		t.Fatalf("expected download confirmation form, got: %s", previewResponse.Body.String())
+	}
+	if strings.Contains(previewResponse.Body.String(), "PrivateKey = test-private-key") {
+		t.Fatal("download preview exposed the wireguard configuration")
+	}
+
+	secondPreviewResponse := httptest.NewRecorder()
+	handler.ServeHTTP(secondPreviewResponse, httptest.NewRequest(http.MethodGet, downloadURL, nil))
+	if secondPreviewResponse.Code != http.StatusOK {
+		t.Fatalf("expected repeated preview status %d, got %d: %s", http.StatusOK, secondPreviewResponse.Code, secondPreviewResponse.Body.String())
+	}
+
 	downloadResponse := httptest.NewRecorder()
-	handler.ServeHTTP(downloadResponse, httptest.NewRequest(http.MethodGet, downloadURL, nil))
+	handler.ServeHTTP(downloadResponse, httptest.NewRequest(http.MethodPost, downloadURL, nil))
 	if downloadResponse.Code != http.StatusOK {
 		t.Fatalf("expected download status %d, got %d: %s", http.StatusOK, downloadResponse.Code, downloadResponse.Body.String())
 	}
@@ -380,7 +398,7 @@ func TestDiscordAccessApproveCommand(t *testing.T) {
 		t.Fatalf("expected wireguard config, got: %s", downloadResponse.Body.String())
 	}
 	secondDownloadResponse := httptest.NewRecorder()
-	handler.ServeHTTP(secondDownloadResponse, httptest.NewRequest(http.MethodGet, downloadURL, nil))
+	handler.ServeHTTP(secondDownloadResponse, httptest.NewRequest(http.MethodPost, downloadURL, nil))
 	if secondDownloadResponse.Code != http.StatusGone {
 		t.Fatalf("expected consumed download status %d, got %d: %s", http.StatusGone, secondDownloadResponse.Code, secondDownloadResponse.Body.String())
 	}

@@ -60,7 +60,8 @@ func NewWithStore(cfg config.Config, logger *slog.Logger, store access.Store) ht
 	mux.HandleFunc("GET /metrics", s.metrics)
 	mux.HandleFunc("POST /discord/interactions", s.discordInteraction)
 	mux.HandleFunc("GET /oauth/callback", s.discordOAuthCallback)
-	mux.HandleFunc("GET /download/{token}", s.downloadVPNConfiguration)
+	mux.HandleFunc("GET /download/{token}", s.confirmVPNConfigurationDownload)
+	mux.HandleFunc("POST /download/{token}", s.downloadVPNConfiguration)
 	mux.HandleFunc("/", s.notFound)
 
 	return s.logRequests(mux)
@@ -332,24 +333,48 @@ func (s *Server) reviewAccessRequest(w http.ResponseWriter, interaction discord.
 	s.logger.Info("access request reviewed", "request_id", request.ID, "status", request.Status, "reviewer_id", reviewerID, "discord_user_id", request.DiscordUserID)
 	if status == access.StatusApproved {
 		downloadURL := s.cfg.PublicBaseURL + "/download/" + url.PathEscape(request.DownloadToken)
-		writeJSON(w, http.StatusOK, discord.EphemeralMessage("Access request "+request.ID+" approved. Authentik user is ready and the VPN config can be downloaded once: "+downloadURL))
+		writeJSON(w, http.StatusOK, discord.EphemeralMessage("Access request "+request.ID+" approved. Authentik user is ready. Open this link and click Download to retrieve the VPN config once: "+downloadURL))
 		return
 	}
 	writeJSON(w, http.StatusOK, discord.EphemeralMessage("Access request "+request.ID+" denied."))
 }
 
+func (s *Server) confirmVPNConfigurationDownload(w http.ResponseWriter, r *http.Request) {
+	setDownloadPageHeaders(w)
+	if _, err := s.store.GetDownload(r.PathValue("token")); err != nil {
+		writeDownloadError(w, err)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_, _ = io.WriteString(w, `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Download VPN configuration</title>
+<style>
+body{font:16px/1.5 system-ui,sans-serif;max-width:36rem;margin:10vh auto;padding:0 1.25rem;color:#171717}
+button{font:inherit;font-weight:600;padding:.7rem 1rem;cursor:pointer}
+</style>
+</head>
+<body>
+<main>
+<h1>Download VPN configuration</h1>
+<p>This configuration can be downloaded once. Store it securely.</p>
+<form method="post"><button type="submit">Download</button></form>
+</main>
+</body>
+</html>`)
+}
+
 func (s *Server) downloadVPNConfiguration(w http.ResponseWriter, r *http.Request) {
+	setDownloadPageHeaders(w)
 	token := r.PathValue("token")
 	request, err := s.store.ConsumeDownload(token)
 	if err != nil {
-		switch {
-		case errors.Is(err, access.ErrDownloadExpired):
-			writeJSON(w, http.StatusGone, map[string]string{"error": "download token expired"})
-		case errors.Is(err, access.ErrDownloadConsumed):
-			writeJSON(w, http.StatusGone, map[string]string{"error": "download token already used"})
-		default:
-			writeJSON(w, http.StatusNotFound, map[string]string{"error": "download token not found"})
-		}
+		writeDownloadError(w, err)
 		return
 	}
 
@@ -358,6 +383,25 @@ func (s *Server) downloadVPNConfiguration(w http.ResponseWriter, r *http.Request
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte(request.WireGuardConfiguration))
+}
+
+func setDownloadPageHeaders(w http.ResponseWriter) {
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'")
+	w.Header().Set("Referrer-Policy", "no-referrer")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("X-Robots-Tag", "noindex, nofollow, noarchive")
+}
+
+func writeDownloadError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, access.ErrDownloadExpired):
+		writeJSON(w, http.StatusGone, map[string]string{"error": "download token expired"})
+	case errors.Is(err, access.ErrDownloadConsumed):
+		writeJSON(w, http.StatusGone, map[string]string{"error": "download token already used"})
+	default:
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "download token not found"})
+	}
 }
 
 func (s *Server) handleReviewError(w http.ResponseWriter, err error, requestID string) {
