@@ -15,7 +15,8 @@ The Discord endpoint validates Discord Ed25519 signatures, answers PING with
 PONG, acknowledges `/access request`, and lets configured admins approve or deny
 requests with ephemeral responses. Approval creates or reuses an Authentik user.
 Approval also creates or reuses a wg-easy peer and returns a single-use
-WireGuard config download link.
+WireGuard config download link. Approval is deferred immediately and the
+ephemeral response is updated after provisioning completes.
 
 ## Configuration
 

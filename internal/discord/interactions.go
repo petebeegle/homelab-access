@@ -15,18 +15,21 @@ const (
 
 	ResponseTypePong                     = 1
 	ResponseTypeChannelMessageWithSource = 4
+	ResponseTypeDeferredChannelMessage   = 5
 
 	MessageFlagEphemeral = 1 << 6
 )
 
 type Interaction struct {
-	ID        string           `json:"id,omitempty"`
-	Type      int              `json:"type"`
-	Data      *InteractionData `json:"data,omitempty"`
-	GuildID   string           `json:"guild_id,omitempty"`
-	ChannelID string           `json:"channel_id,omitempty"`
-	Member    *Member          `json:"member,omitempty"`
-	User      *User            `json:"user,omitempty"`
+	ID            string           `json:"id,omitempty"`
+	ApplicationID string           `json:"application_id,omitempty"`
+	Token         string           `json:"token,omitempty"`
+	Type          int              `json:"type"`
+	Data          *InteractionData `json:"data,omitempty"`
+	GuildID       string           `json:"guild_id,omitempty"`
+	ChannelID     string           `json:"channel_id,omitempty"`
+	Member        *Member          `json:"member,omitempty"`
+	User          *User            `json:"user,omitempty"`
 }
 
 type InteractionData struct {
@@ -196,6 +199,15 @@ func EphemeralMessage(content string) InteractionResponse {
 		Data: &InteractionResponseData{
 			Content: content,
 			Flags:   MessageFlagEphemeral,
+		},
+	}
+}
+
+func DeferredEphemeralMessage() InteractionResponse {
+	return InteractionResponse{
+		Type: ResponseTypeDeferredChannelMessage,
+		Data: &InteractionResponseData{
+			Flags: MessageFlagEphemeral,
 		},
 	}
 }

@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/petebeegle/homelab-access/internal/config"
 )
@@ -304,15 +305,20 @@ func TestDiscordAccessApproveCommand(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	authentikServer := fakeAuthentikServer(t)
+	provisioningGate := make(chan struct{})
+	authentikServer := fakeAuthentikServerWithGate(t, provisioningGate)
 	defer authentikServer.Close()
 	wgEasyServer := fakeWGEasyServer(t)
 	defer wgEasyServer.Close()
+	discordServer, discordMessages := fakeDiscordWebhookServer(t)
+	defer discordServer.Close()
 
 	handler := testHandler(t, config.Config{
 		HTTPAddr:            ":8080",
 		PublicBaseURL:       "https://onboard.example.com",
+		DiscordAppID:        "app-1",
 		DiscordPublicKey:    hex.EncodeToString(publicKey),
+		DiscordAPIBaseURL:   discordServer.URL,
 		DiscordAdminUserIDs: []string{"admin-1"},
 		AuthentikBaseURL:    authentikServer.URL,
 		AuthentikToken:      "token-1",
@@ -341,6 +347,8 @@ func TestDiscordAccessApproveCommand(t *testing.T) {
 
 	requestID := extractRequestID(t, createResponse.Body.String())
 	approveBody := `{
+		"application_id": "app-1",
+		"token": "interaction-token-1",
 		"type": 2,
 		"member": {
 			"user": {"id": "admin-1", "username": "admin"}
@@ -364,13 +372,19 @@ func TestDiscordAccessApproveCommand(t *testing.T) {
 	if approveResponse.Code != http.StatusOK {
 		t.Fatalf("expected approve status %d, got %d: %s", http.StatusOK, approveResponse.Code, approveResponse.Body.String())
 	}
-	if !strings.Contains(approveResponse.Body.String(), "approved") {
-		t.Fatalf("expected approval response, got: %s", approveResponse.Body.String())
+	if !strings.Contains(approveResponse.Body.String(), `"type":5`) || !strings.Contains(approveResponse.Body.String(), `"flags":64`) {
+		t.Fatalf("expected ephemeral deferred response, got: %s", approveResponse.Body.String())
 	}
-	if !strings.Contains(approveResponse.Body.String(), "https://onboard.example.com/download/") {
-		t.Fatalf("expected download link, got: %s", approveResponse.Body.String())
+	close(provisioningGate)
+
+	finalMessage := waitForDiscordMessage(t, discordMessages)
+	if !strings.Contains(finalMessage, "approved") {
+		t.Fatalf("expected approval response, got: %s", finalMessage)
 	}
-	downloadURL := extractDownloadURL(t, approveResponse.Body.String())
+	if !strings.Contains(finalMessage, "https://onboard.example.com/download/") {
+		t.Fatalf("expected download link, got: %s", finalMessage)
+	}
+	downloadURL := extractDownloadURL(t, finalMessage)
 	previewResponse := httptest.NewRecorder()
 	handler.ServeHTTP(previewResponse, httptest.NewRequest(http.MethodGet, downloadURL, nil))
 	if previewResponse.Code != http.StatusOK {
@@ -422,11 +436,15 @@ func TestDiscordAccessApproveCommandRejectsUnauthorizedUser(t *testing.T) {
 	defer authentikServer.Close()
 	wgEasyServer := fakeWGEasyServer(t)
 	defer wgEasyServer.Close()
+	discordServer, discordMessages := fakeDiscordWebhookServer(t)
+	defer discordServer.Close()
 
 	handler := testHandler(t, config.Config{
 		HTTPAddr:            ":8080",
 		PublicBaseURL:       "https://onboard.example.com",
+		DiscordAppID:        "app-1",
 		DiscordPublicKey:    hex.EncodeToString(publicKey),
+		DiscordAPIBaseURL:   discordServer.URL,
 		DiscordAdminUserIDs: []string{"admin-1"},
 		AuthentikBaseURL:    authentikServer.URL,
 		AuthentikToken:      "token-1",
@@ -469,8 +487,12 @@ func TestDiscordAccessApproveCommandRejectsUnauthorizedUser(t *testing.T) {
 	if approveResponse.Code != http.StatusOK {
 		t.Fatalf("expected approve status %d, got %d: %s", http.StatusOK, approveResponse.Code, approveResponse.Body.String())
 	}
-	if !strings.Contains(approveResponse.Body.String(), "approved") {
-		t.Fatalf("expected approval response after unauthorized attempt, got: %s", approveResponse.Body.String())
+	if !strings.Contains(approveResponse.Body.String(), `"type":5`) {
+		t.Fatalf("expected deferred approval response, got: %s", approveResponse.Body.String())
+	}
+	finalMessage := waitForDiscordMessage(t, discordMessages)
+	if !strings.Contains(finalMessage, "approved") {
+		t.Fatalf("expected approval response after unauthorized attempt, got: %s", finalMessage)
 	}
 }
 
@@ -498,6 +520,8 @@ func signedDiscordRequest(t *testing.T, privateKey ed25519.PrivateKey, body stri
 
 func accessReviewBody(command, requestID, userID string) string {
 	return `{
+		"application_id": "app-1",
+		"token": "interaction-token-1",
 		"type": 2,
 		"member": {
 			"user": {"id": "` + userID + `", "username": "reviewer"}
@@ -517,7 +541,48 @@ func accessReviewBody(command, requestID, userID string) string {
 	}`
 }
 
+func fakeDiscordWebhookServer(t *testing.T) (*httptest.Server, <-chan string) {
+	t.Helper()
+
+	messages := make(chan string, 4)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPatch || r.URL.Path != "/webhooks/app-1/interaction-token-1/messages/@original" {
+			t.Errorf("unexpected discord webhook request: %s %s", r.Method, r.URL.String())
+			http.Error(w, "unexpected request", http.StatusBadRequest)
+			return
+		}
+		var body map[string]string
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("decode discord webhook body: %v", err)
+			http.Error(w, "invalid body", http.StatusBadRequest)
+			return
+		}
+		messages <- body["content"]
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	return server, messages
+}
+
+func waitForDiscordMessage(t *testing.T, messages <-chan string) string {
+	t.Helper()
+
+	select {
+	case message := <-messages:
+		return message
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for deferred Discord response")
+		return ""
+	}
+}
+
 func fakeAuthentikServer(t *testing.T) *httptest.Server {
+	t.Helper()
+
+	return fakeAuthentikServerWithGate(t, nil)
+}
+
+func fakeAuthentikServerWithGate(t *testing.T, provisioningGate <-chan struct{}) *httptest.Server {
 	t.Helper()
 
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -526,6 +591,15 @@ func fakeAuthentikServer(t *testing.T) *httptest.Server {
 		}
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v3/core/users/":
+			if provisioningGate != nil {
+				select {
+				case <-provisioningGate:
+				case <-time.After(2 * time.Second):
+					t.Error("approval did not return before Authentik provisioning")
+					http.Error(w, "provisioning gate timed out", http.StatusGatewayTimeout)
+					return
+				}
+			}
 			_ = json.NewEncoder(w).Encode(map[string]any{"results": []any{}})
 		case r.Method == http.MethodPost && r.URL.Path == "/api/v3/core/users/":
 			w.WriteHeader(http.StatusCreated)
